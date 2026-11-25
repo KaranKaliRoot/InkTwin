@@ -1,0 +1,4681 @@
+﻿=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\glyph\Glyph.kt ===
+package com.app.inktwin.core.glyph
+
+data class Glyph(
+    val character: String,
+    val unicode: Int,
+    val variants: List<GlyphVariant> = emptyList(),
+    val isFallback: Boolean = false
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\glyph\GlyphNormalizer.kt ===
+package com.app.inktwin.core.glyph
+
+/**
+ * Normalizes drawn glyph strokes to a standard 1000x1000 em-square coordinate system.
+ * Preserves relative vertical positioning for proper baseline alignment.
+ */
+object GlyphNormalizer {
+
+    data class NormalizationResult(
+        val normalizedCommands: List<PathCommand>,
+        val advanceWidth: Float,
+        val leftBearing: Float,
+        val baselineY: Float = 750f
+    )
+
+    /**
+     * Normalizes a list of path commands to fit within a 1000x1000 em-square.
+     * Trims horizontal bounds (minX to maxX) while keeping vertical coordinates
+     * aligned relative to the pad height (0..1000 em-square) so baseline alignment is preserved.
+     *
+     * @param commands The original path commands from user drawing
+     * @param drawingHeight The height of the drawing area (for baseline calculation, default 1000f)
+     * @param baselineY The Y coordinate of the baseline within the drawing area (default 750f)
+     */
+    fun normalize(
+        commands: List<PathCommand>,
+        drawingHeight: Float = 1000f,
+        baselineY: Float = 750f
+    ): NormalizationResult {
+        if (commands.isEmpty()) {
+            return NormalizationResult(emptyList(), 0f, 0f, baselineY)
+        }
+
+        // Collect all points to compute bounding box
+        val allPoints = mutableListOf<Pair<Float, Float>>()
+        for (cmd in commands) {
+            for (i in cmd.points.indices step 2) {
+                if (i + 1 < cmd.points.size) {
+                    allPoints.add(cmd.points[i] to cmd.points[i + 1])
+                }
+            }
+        }
+
+        if (allPoints.isEmpty()) {
+            return NormalizationResult(emptyList(), 0f, 0f, baselineY)
+        }
+
+        // Compute horizontal bounds
+        val minX = allPoints.minOf { it.first }
+        val maxX = allPoints.maxOf { it.first }
+        val maxY = allPoints.maxOf { it.second }
+
+        val effHeight = if (drawingHeight > 0f) drawingHeight else maxOf(1000f, maxY)
+        val scale = 1000f / effHeight
+
+        val leftBearing = 50f
+        val charWidth = (maxX - minX) * scale
+        val advanceWidth = charWidth + (leftBearing * 2)
+        val normalizedBaselineY = baselineY * scale
+
+        // Transform all commands: trim X, scale Y relative to pad height
+        val normalizedCommands = commands.map { cmd ->
+            val normalizedPoints = cmd.points.mapIndexed { index, value ->
+                if (index % 2 == 0) {
+                    // X coordinate: trim horizontal bounds and add left bearing
+                    (value - minX) * scale + leftBearing
+                } else {
+                    // Y coordinate: preserve vertical position relative to pad height (0..1000)
+                    value * scale
+                }
+            }
+            cmd.copy(points = normalizedPoints)
+        }
+
+        return NormalizationResult(
+            normalizedCommands = normalizedCommands,
+            advanceWidth = advanceWidth,
+            leftBearing = leftBearing,
+            baselineY = normalizedBaselineY
+        )
+    }
+
+    /**
+     * Smooths a sequence of points using quadratic BÃ©zier curves.
+     * Converts raw touch points into smooth path commands.
+     */
+    fun smoothPath(rawPoints: List<Pair<Float, Float>>): List<PathCommand> {
+        if (rawPoints.isEmpty()) return emptyList()
+        if (rawPoints.size == 1) {
+            return listOf(PathCommand(type = "moveTo", points = listOf(rawPoints[0].first, rawPoints[0].second)))
+        }
+
+        val commands = mutableListOf<PathCommand>()
+
+        // Start at first point
+        commands.add(PathCommand(
+            type = "moveTo",
+            points = listOf(rawPoints[0].first, rawPoints[0].second)
+        ))
+
+        if (rawPoints.size == 2) {
+            // Just a line for two points
+            commands.add(PathCommand(
+                type = "lineTo",
+                points = listOf(rawPoints[1].first, rawPoints[1].second)
+            ))
+            return commands
+        }
+
+        // For 3+ points, use quadratic curves
+        var i = 1
+        while (i < rawPoints.size - 1) {
+            val current = rawPoints[i]
+            val next = rawPoints[i + 1]
+
+            // Control point is current, end point is midpoint to next for smoother curves
+            val midX = (current.first + next.first) / 2f
+            val midY = (current.second + next.second) / 2f
+
+            commands.add(PathCommand(
+                type = "quadTo",
+                points = listOf(current.first, current.second, midX, midY)
+            ))
+
+            i += 1
+        }
+
+        // Finish with lineTo the final point
+        val last = rawPoints.last()
+        commands.add(PathCommand(
+            type = "lineTo",
+            points = listOf(last.first, last.second)
+        ))
+
+        return commands
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\glyph\GlyphVariant.kt ===
+package com.app.inktwin.core.glyph
+
+import android.graphics.Bitmap
+
+data class GlyphVariant(
+    val variantIndex: Int,
+    val vectorCommands: List<PathCommand> = emptyList(),
+    val alphaMaskBitmap: Bitmap? = null,
+    val bitmapWidth: Int = 0,
+    val bitmapHeight: Int = 0,
+    val advanceWidth: Float = 0f,
+    val leftBearing: Float = 0f,
+    val topBearing: Float = 0f,
+    val ascent: Float = 0f,
+    val descent: Float = 0f
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\glyph\PathCommand.kt ===
+package com.app.inktwin.core.glyph
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class PathCommand(
+    val type: String, // "moveTo", "lineTo", "quadTo", "cubicTo", "close"
+    val points: List<Float> // x,y pairs: moveTo=2, lineTo=2, quadTo=4, cubicTo=6
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\note\NoteDraft.kt ===
+package com.app.inktwin.core.note
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class ColorSpan(
+    val start: Int,
+    val end: Int,
+    val colorHex: String,
+    val granularity: String
+)
+
+data class NoteDraft(
+    val id: Long = 0,
+    val profileId: Long? = null,
+    val title: String = "Untitled Note",
+    val plainText: String = "",
+    val colorSpans: List<ColorSpan> = emptyList(),
+    val pageSettings: PageSettings = PageSettings(),
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\note\PageSettings.kt ===
+package com.app.inktwin.core.note
+
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class PageSettings(
+    val showRedMargins: Boolean = false,
+    val showPageNumbers: Boolean = false,
+    val pageSize: String = "A4",
+    val marginLeft: Float = 72f,
+    val marginRight: Float = 72f,
+    val marginTop: Float = 72f,
+    val marginBottom: Float = 72f,
+    val redMarginOffset: Float = 36f,
+    val lineSpacing: Float = 1.2f,
+    val letterSpacing: Float = 0f
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\pipeline\PlainPaperScanner.kt ===
+package com.app.inktwin.core.pipeline
+
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Rect
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.tasks.await
+
+/**
+ * Scanned character candidate from a photo of handwritten notes.
+ */
+data class ScannedCharCandidate(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val proposedChar: String,          // ML Kit's best guess
+    val alphaMask: Bitmap,             // Transparent PNG with ink in opaque black
+    val advanceWidth: Float,           // Estimated advance width in pixels
+    val baselineY: Float,              // Baseline offset from top of crop
+    var isSelected: Boolean = true     // User can deselect bad crops
+) {
+    fun toGlyphVariant(variantIndex: Int): com.app.inktwin.core.glyph.GlyphVariant {
+        return com.app.inktwin.core.glyph.GlyphVariant(
+            variantIndex = variantIndex,
+            vectorCommands = emptyList(),
+            alphaMaskBitmap = alphaMask,
+            bitmapWidth = alphaMask.width,
+            bitmapHeight = alphaMask.height,
+            advanceWidth = advanceWidth,
+            leftBearing = 0f,
+            topBearing = 0f,
+            ascent = baselineY,
+            descent = alphaMask.height.toFloat() - baselineY
+        )
+    }
+}
+
+/**
+ * Pure-Kotlin image processing pipeline for plain-paper handwriting scans.
+ * Uses Integral Image (Summed-Area Table) for fast adaptive thresholding
+ * without any native OpenCV .so dependencies.
+ */
+object PlainPaperScanner {
+
+    private const val MAX_DIMENSION = 2048
+    private const val MIN_CHAR_WIDTH = 6
+    private const val MIN_CHAR_HEIGHT = 8
+    private const val DEFAULT_WINDOW_RATIO = 1f / 24f  // ~width/24 window size
+
+    /**
+     * Binarizes a page image using adaptive Bradley-Roth / Sauvola thresholding.
+     * Returns a bitmap where dark ink becomes opaque black (0xFF000000)
+     * and paper/shadows become fully transparent (0x00000000).
+     *
+     * @param bitmap Input bitmap (color or grayscale)
+     * @param sensitivity Sensitivity factor (0.05-0.25), lower = more sensitive to faint ink
+     * @return ARGB_8888 bitmap with transparent background and opaque ink
+     */
+    fun binarizePage(bitmap: Bitmap, sensitivity: Float = 0.15f): Bitmap {
+        // Downscale if too large
+        val scaledBitmap = if (bitmap.width > MAX_DIMENSION || bitmap.height > MAX_DIMENSION) {
+            val scale = MAX_DIMENSION.toFloat() / maxOf(bitmap.width, bitmap.height)
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt(),
+                (bitmap.height * scale).toInt(),
+                true
+            )
+        } else {
+            bitmap
+        }
+
+        val width = scaledBitmap.width
+        val height = scaledBitmap.height
+
+        // Extract grayscale luminance (0.0 - 1.0)
+        val gray = IntArray(width * height)
+        val pixels = IntArray(width * height)
+        scaledBitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (i in 0 until pixels.size) {
+            val p = pixels[i]
+            // Luminance: 0.299*R + 0.587*G + 0.114*B
+            val r = Color.red(p)
+            val g = Color.green(p)
+            val b = Color.blue(p)
+            val lum = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
+            gray[i] = (lum * 1000).toInt() // Scale to 0-1000 for integer math
+        }
+
+        // Build integral image (summed-area table)
+        val integral = LongArray((width + 1) * (height + 1))
+        for (y in 0 until height) {
+            var rowSum = 0L
+            val rowOffset = y * width
+            val intRowOffset = (y + 1) * (width + 1)
+            val intPrevRowOffset = y * (width + 1)
+            for (x in 0 until width) {
+                val idx = rowOffset + x
+                rowSum += gray[idx].toLong()
+                integral[intRowOffset + x + 1] = integral[intPrevRowOffset + x + 1] + rowSum
+            }
+        }
+
+        // Adaptive thresholding
+        val windowSize = maxOf(3, (width * DEFAULT_WINDOW_RATIO).toInt())
+        val halfWindow = windowSize / 2
+        val k = sensitivity // sensitivity factor
+
+        val output = IntArray(width * height)
+        val outBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                // Window bounds
+                val x1 = maxOf(0, x - halfWindow)
+                val y1 = maxOf(0, y - halfWindow)
+                val x2 = minOf(width - 1, x + halfWindow)
+                val y2 = minOf(height - 1, y + halfWindow)
+
+                // Get sum from integral image
+                val count = ((x2 - x1 + 1) * (y2 - y1 + 1)).toLong()
+                val sum = integral[(y2 + 1) * (width + 1) + (x2 + 1)]
+                    - integral[y1 * (width + 1) + (x2 + 1)]
+                    - integral[(y2 + 1) * (width + 1) + x1]
+                    + integral[y1 * (width + 1) + x1]
+
+                val mean = sum.toFloat() / count
+                val threshold = mean * (1f - k)
+
+                val pixelValue = gray[y * width + x].toFloat()
+                if (pixelValue < threshold) {
+                    // Ink: opaque black
+                    output[y * width + x] = -0x1000000
+                } else {
+                    // Paper: transparent
+                    output[y * width + x] = 0
+                }
+            }
+        }
+
+        outBitmap.setPixels(output, 0, width, 0, 0, width, height)
+        return outBitmap
+    }
+
+    /**
+     * Extracts character candidates from a binarized page using ML Kit Text Recognition.
+     *
+     * @param originalBitmap Original color image (for context)
+     * @param binarizedBitmap Binarized transparent bitmap from binarizePage()
+     * @return List of ScannedCharCandidate with alpha masks
+     */
+    suspend fun extractCandidates(
+        originalBitmap: Bitmap,
+        binarizedBitmap: Bitmap
+    ): List<ScannedCharCandidate> {
+        val candidates = mutableListOf<ScannedCharCandidate>()
+
+        // ML Kit Text Recognition
+        val recognizer: TextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val inputImage = InputImage.fromBitmap(originalBitmap, 0)
+        val result: Text = recognizer.process(inputImage).await()
+
+        // Process each line -> element (word) -> symbol (character)
+        for (block in result.textBlocks) {
+            for (line in block.lines) {
+                // Get line baseline for vertical alignment
+                val lineBox = line.boundingBox ?: continue
+                val lineBottom = lineBox.bottom
+                val lineTop = lineBox.top
+
+                for (element in line.elements) {
+                    val elementText = element.text
+                    val elementBox = element.boundingBox ?: continue
+
+                    // Try to get individual symbols
+                    val symbols = element.symbols
+
+                    if (symbols.isNotEmpty()) {
+                        // ML Kit provided individual character boxes
+                        for (symbol in symbols) {
+                            val symbolText = symbol.text
+                            val symbolBox = symbol.boundingBox ?: continue
+
+                            val crop = cropAndTrim(
+                                binarizedBitmap,
+                                symbolBox,
+                                lineBottom
+                            )
+                            crop?.let { candidates.add(it) }
+                        }
+                    } else if (elementText.length > 1) {
+                        // No symbols - split word into characters using vertical projection
+                        val wordCandidates = splitWordByProjection(
+                            binarizedBitmap,
+                            elementBox,
+                            elementText,
+                            lineBottom
+                        )
+                        candidates.addAll(wordCandidates)
+                    } else {
+                        // Single character word
+                        val crop = cropAndTrim(
+                            binarizedBitmap,
+                            elementBox,
+                            lineBottom
+                        )
+                        crop?.let { candidates.add(it) }
+                    }
+                }
+            }
+        }
+
+        recognizer.close()
+        return candidates
+    }
+
+    /**
+     * Crops a character from the binarized bitmap and trims transparent padding.
+     * Preserves vertical baseline offset relative to the line's bottom.
+     */
+    private fun cropAndTrim(
+        binarized: Bitmap,
+        box: Rect,
+        lineBottom: Int
+    ): ScannedCharCandidate? {
+        val cropRect = Rect(
+            maxOf(0, box.left),
+            maxOf(0, box.top),
+            minOf(binarized.width, box.right),
+            minOf(binarized.height, box.bottom)
+        )
+
+        if (cropRect.width() < MIN_CHAR_WIDTH || cropRect.height() < MIN_CHAR_HEIGHT) {
+            return null
+        }
+
+        // Find actual ink bounds to trim excess transparent space
+        val pixels = IntArray(cropRect.width() * cropRect.height())
+        binarized.getPixels(pixels, 0, cropRect.width(), cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+
+        var minX = cropRect.width()
+        var maxX = 0
+        var minY = cropRect.height()
+        var maxY = 0
+        var inkFound = false
+
+        for (y in 0 until cropRect.height()) {
+            for (x in 0 until cropRect.width()) {
+                val p = pixels[y * cropRect.width() + x]
+                if (Color.alpha(p) > 0) { // Opaque pixel (ink)
+                    inkFound = true
+                    minX = minOf(minX, x)
+                    maxX = maxOf(maxX, x)
+                    minY = minOf(minY, y)
+                    maxY = maxOf(maxY, y)
+                }
+            }
+        }
+
+        if (!inkFound || minX > maxX || minY > maxY) return null
+
+        // Trim to ink bounds with small padding
+        val padding = 2
+        val trimmedRect = Rect(
+            maxOf(0, minX - padding),
+            maxOf(0, minY - padding),
+            minOf(cropRect.width(), maxX + padding + 1),
+            minOf(cropRect.height(), maxY + padding + 1)
+        )
+
+        val trimmedWidth = trimmedRect.width()
+        val trimmedHeight = trimmedRect.height()
+
+        if (trimmedWidth < MIN_CHAR_WIDTH || trimmedHeight < MIN_CHAR_HEIGHT) return null
+
+        // Create trimmed bitmap
+        val trimmedPixels = IntArray(trimmedWidth * trimmedHeight)
+        for (y in 0 until trimmedHeight) {
+            for (x in 0 until trimmedWidth) {
+                val srcX = trimmedRect.left + x
+                val srcY = trimmedRect.top + y
+                if (srcX < cropRect.width() && srcY < cropRect.height()) {
+                    trimmedPixels[y * trimmedWidth + x] = pixels[srcY * cropRect.width() + srcX]
+                }
+            }
+        }
+
+        val alphaMask = Bitmap.createBitmap(trimmedWidth, trimmedHeight, Bitmap.Config.ARGB_8888)
+        alphaMask.setPixels(trimmedPixels, 0, trimmedWidth, 0, 0, trimmedWidth, trimmedHeight)
+
+        // Baseline Y relative to top of trimmed crop
+        val baselineY = (lineBottom - (cropRect.top + trimmedRect.top)).toFloat()
+
+        return ScannedCharCandidate(
+            proposedChar = "", // Will be set by caller
+            alphaMask = alphaMask,
+            advanceWidth = trimmedWidth.toFloat(),
+            baselineY = baselineY
+        )
+    }
+
+    /**
+     * Splits a word box into individual characters using vertical projection valley finding.
+     */
+    private fun splitWordByProjection(
+        binarized: Bitmap,
+        wordBox: Rect,
+        wordText: String,
+        lineBottom: Int
+    ): List<ScannedCharCandidate> {
+        val candidates = mutableListOf<ScannedCharCandidate>()
+
+        // Crop word region
+        val cropRect = Rect(
+            maxOf(0, wordBox.left),
+            maxOf(0, wordBox.top),
+            minOf(binarized.width, wordBox.right),
+            minOf(binarized.height, wordBox.bottom)
+        )
+
+        if (cropRect.width() < MIN_CHAR_WIDTH || cropRect.height() < MIN_CHAR_HEIGHT) {
+            return candidates
+        }
+
+        val pixels = IntArray(cropRect.width() * cropRect.height())
+        binarized.getPixels(pixels, 0, cropRect.width(), cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
+
+        // Vertical projection: count ink pixels per column
+        val projection = IntArray(cropRect.width())
+        for (x in 0 until cropRect.width()) {
+            var count = 0
+            for (y in 0 until cropRect.height()) {
+                val p = pixels[y * cropRect.width() + x]
+                if (Color.alpha(p) > 0) count++
+            }
+            projection[x] = count
+        }
+
+        // Find valleys (local minima in projection) - character boundaries
+        val valleys = findValleys(projection)
+
+        // Map valleys to character positions
+        // Distribute characters evenly between valleys
+        val charCount = wordText.length
+        if (charCount == 0) return candidates
+
+        var prevX = 0
+        var charIndex = 0
+
+        for (valleyX in valleys) {
+            if (charIndex >= charCount) break
+
+            val charBox = Rect(
+                cropRect.left + prevX,
+                cropRect.top,
+                cropRect.left + valleyX,
+                cropRect.bottom
+            )
+
+            val crop = cropAndTrim(binarized, charBox, lineBottom)
+            crop?.let {
+                candidates.add(it.copy(proposedChar = wordText[charIndex].toString()))
+            }
+
+            prevX = valleyX
+            charIndex++
+        }
+
+        // Last character
+        if (charIndex < charCount) {
+            val charBox = Rect(
+                cropRect.left + prevX,
+                cropRect.top,
+                cropRect.right,
+                cropRect.bottom
+            )
+            val crop = cropAndTrim(binarized, charBox, lineBottom)
+            crop?.let {
+                candidates.add(it.copy(proposedChar = wordText[charIndex].toString()))
+            }
+        }
+
+        return candidates
+    }
+
+    private fun findValleys(projection: IntArray): List<Int> {
+        val valleys = mutableListOf<Int>()
+        val window = maxOf(3, projection.size / 20)
+        val maxVal = projection.maxOrNull() ?: 0
+        val threshold = (maxVal * 0.1f).toInt()
+
+        for (i in window until projection.size - window) {
+            val isLocalMin = (i - window until i + window).all { projection[i] <= projection[it] }
+            val isLow = projection[i] <= threshold
+            if (isLocalMin && isLow) {
+                // Avoid too-close valleys
+                if (valleys.isEmpty() || i - valleys.last() > window) {
+                    valleys.add(i)
+                }
+            }
+        }
+
+        return valleys
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\profile\HandwritingProfile.kt ===
+package com.app.inktwin.core.profile
+
+enum class SourceType(val value: Int) {
+    DRAW(0),
+    SCAN(1),
+    MERGED(2);
+
+    companion object {
+        fun fromValue(value: Int): SourceType = entries.first { it.value == value }
+    }
+}
+
+data class HandwritingProfile(
+    val id: Long = 0,
+    val name: String = "Default",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val sourceType: SourceType = SourceType.DRAW,
+    val isActive: Boolean = true
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\core\render\HandwritingPageRenderer.kt ===
+package com.app.inktwin.core.render
+
+import android.graphics.*
+import com.app.inktwin.core.glyph.Glyph
+import com.app.inktwin.core.glyph.PathCommand
+import com.app.inktwin.core.note.ColorSpan
+import com.app.inktwin.core.note.NoteDraft
+import com.app.inktwin.core.note.PageSettings
+
+data class PageLayout(
+    val pageIndex: Int,
+    val lines: List<LineLayout>,
+    val charStartIndex: Int,
+    val charEndIndex: Int
+)
+
+data class LineLayout(
+    val lineIndex: Int,
+    val text: String,
+    val charStartIndex: Int,
+    val charEndIndex: Int,
+    val baselineY: Float,
+    val glyphLayouts: List<GlyphLayout>
+)
+
+data class GlyphLayout(
+    val char: Char,
+    val charIndex: Int,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val colorHex: String,
+    val variantIndex: Int,
+    val glyph: Glyph?,
+    val isFallback: Boolean
+)
+
+object HandwritingPageRenderer {
+
+    private const val DPI = 150
+    private const val A4_WIDTH_PX = 1240
+    private const val A4_HEIGHT_PX = 1754
+    private const val FONT_SIZE = 36f
+    private const val LINE_SPACING_DEFAULT = 1.2f
+
+    private val fallbackTypeface = Typeface.create("serif", Typeface.ITALIC)
+    private val marginPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#DC2626")
+        strokeWidth = 2f
+        style = Paint.Style.STROKE
+    }
+    private val ruledLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#D1D5DB")
+        strokeWidth = 1f
+    }
+    private val pageNumberPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#6B7280")
+        textSize = 24f
+        textAlign = Paint.Align.RIGHT
+    }
+
+    fun getPageSize(pageSize: String): Pair<Int, Int> {
+        return when (pageSize) {
+            "A4" -> A4_WIDTH_PX to A4_HEIGHT_PX
+            "Letter" -> 1275 to 1650
+            else -> A4_WIDTH_PX to A4_HEIGHT_PX
+        }
+    }
+
+    fun paginateText(
+        draft: NoteDraft,
+        pageSettings: PageSettings,
+        fontSize: Float = FONT_SIZE,
+        glyphsByChar: Map<String, Glyph> = emptyMap()
+    ): List<PageLayout> {
+        val pages = mutableListOf<PageLayout>()
+        val text = draft.plainText
+        val lines = text.split("\n")
+
+        val (pageWidth, pageHeight) = getPageSize(pageSettings.pageSize)
+        val usableHeight = pageHeight - pageSettings.marginTop - pageSettings.marginBottom
+        val lineHeight = fontSize * pageSettings.lineSpacing
+        val maxLinesPerPage = (usableHeight / lineHeight).toInt().coerceAtLeast(1)
+
+        var charIndex = 0
+        var pageIndex = 0
+        var lineIndexInPage = 0
+        var currentLines = mutableListOf<LineLayout>()
+
+        for ((globalLineIndex, lineText) in lines.withIndex()) {
+            val lineStartChar = charIndex
+            val lineEndChar = charIndex + lineText.length
+
+            val baselineY = pageSettings.marginTop + (lineIndexInPage + 1) * lineHeight
+            val glyphLayouts = layoutLineGlyphs(
+                lineText = lineText,
+                charStartIndex = lineStartChar,
+                baselineY = baselineY,
+                draft = draft,
+                fontSize = fontSize,
+                glyphsByChar = glyphsByChar
+            )
+
+            currentLines.add(
+                LineLayout(
+                    lineIndex = globalLineIndex,
+                    text = lineText,
+                    charStartIndex = lineStartChar,
+                    charEndIndex = lineEndChar,
+                    baselineY = baselineY,
+                    glyphLayouts = glyphLayouts
+                )
+            )
+
+            charIndex = lineEndChar + 1
+            lineIndexInPage++
+
+            if (lineIndexInPage >= maxLinesPerPage) {
+                pages.add(
+                    PageLayout(
+                        pageIndex = pageIndex,
+                        lines = currentLines.toList(),
+                        charStartIndex = pages.lastOrNull()?.charEndIndex ?: 0,
+                        charEndIndex = lineEndChar
+                    )
+                )
+                pageIndex++
+                lineIndexInPage = 0
+                currentLines = mutableListOf()
+            }
+        }
+
+        if (currentLines.isNotEmpty()) {
+            pages.add(
+                PageLayout(
+                    pageIndex = pageIndex,
+                    lines = currentLines.toList(),
+                    charStartIndex = pages.lastOrNull()?.charEndIndex ?: 0,
+                    charEndIndex = text.length
+                )
+            )
+        }
+
+        return pages.ifEmpty {
+            listOf(
+                PageLayout(
+                    pageIndex = 0,
+                    lines = emptyList(),
+                    charStartIndex = 0,
+                    charEndIndex = 0
+                )
+            )
+        }
+    }
+
+    private fun layoutLineGlyphs(
+        lineText: String,
+        charStartIndex: Int,
+        baselineY: Float,
+        draft: NoteDraft,
+        fontSize: Float,
+        glyphsByChar: Map<String, Glyph> = emptyMap()
+    ): List<GlyphLayout> {
+        val glyphs = mutableListOf<GlyphLayout>()
+        var x = 0f
+        val y = baselineY
+
+        for ((i, c) in lineText.withIndex()) {
+            val globalCharIndex = charStartIndex + i
+            val colorSpan = draft.colorSpans.find {
+                globalCharIndex in it.start until it.end
+            }
+            val colorHex = colorSpan?.colorHex ?: "#1E3A8A"
+
+            val charKey = c.toString()
+            val glyph = glyphsByChar[charKey]?.takeIf { it.variants.isNotEmpty() && !it.isFallback }
+
+            val variantIndex = if (glyph != null && glyph.variants.isNotEmpty()) {
+                (globalCharIndex * 31) % glyph.variants.size
+            } else 0
+
+            val width = if (glyph != null && glyph.variants.isNotEmpty()) {
+                val variant = glyph.variants[variantIndex]
+                if (variant.vectorCommands.isNotEmpty()) {
+                    (variant.advanceWidth / 1000f * fontSize).coerceIn(fontSize * 0.35f, fontSize * 1.1f)
+                } else if (variant.alphaMaskBitmap != null) {
+                    fontSize * (variant.bitmapWidth.toFloat() / variant.bitmapHeight.coerceAtLeast(1))
+                } else {
+                    fontSize * 0.6f
+                }
+            } else {
+                fontSize * 0.6f
+            }
+            val height = fontSize
+
+            glyphs.add(
+                GlyphLayout(
+                    char = c,
+                    charIndex = globalCharIndex,
+                    x = x,
+                    y = y,
+                    width = width,
+                    height = height,
+                    colorHex = colorHex,
+                    variantIndex = variantIndex,
+                    glyph = glyph,
+                    isFallback = glyph == null || glyph.variants.isEmpty()
+                )
+            )
+
+            x += width
+        }
+
+        return glyphs
+    }
+
+    fun renderPageToBitmap(
+        page: PageLayout,
+        draft: NoteDraft,
+        glyphsByChar: Map<String, Glyph>,
+        pageSettings: PageSettings,
+        fontSize: Float = FONT_SIZE,
+        showRedMargins: Boolean = pageSettings.showRedMargins,
+        showPageNumbers: Boolean = pageSettings.showPageNumbers,
+        showRuledLines: Boolean = true
+    ): Bitmap {
+        val (width, height) = getPageSize(pageSettings.pageSize)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        canvas.drawColor(Color.WHITE)
+
+        if (showRuledLines) {
+            drawRuledLines(canvas, page, pageSettings, fontSize)
+        }
+
+        if (showRedMargins) {
+            drawRedMargins(canvas, pageSettings)
+        }
+
+        for (line in page.lines) {
+            for (glyphLayout in line.glyphLayouts) {
+                drawGlyph(canvas, glyphLayout, glyphsByChar, fontSize)
+            }
+        }
+
+        if (showPageNumbers) {
+            drawPageNumber(canvas, page.pageIndex + 1, pageSettings)
+        }
+
+        return bitmap
+    }
+
+    private fun drawRuledLines(
+        canvas: Canvas,
+        page: PageLayout,
+        pageSettings: PageSettings,
+        fontSize: Float
+    ) {
+        val lineHeight = fontSize * pageSettings.lineSpacing
+        for (line in page.lines) {
+            val y = line.baselineY + fontSize * 0.2f
+            canvas.drawLine(
+                pageSettings.marginLeft,
+                y,
+                (getPageSize(pageSettings.pageSize).first - pageSettings.marginRight).toFloat(),
+                y,
+                ruledLinePaint
+            )
+        }
+    }
+
+    private fun drawRedMargins(canvas: Canvas, pageSettings: PageSettings) {
+        val (width, height) = getPageSize(pageSettings.pageSize)
+
+        val topMarginY = pageSettings.marginTop + pageSettings.redMarginOffset
+        canvas.drawLine(
+            pageSettings.marginLeft,
+            topMarginY,
+            width - pageSettings.marginRight,
+            topMarginY,
+            marginPaint
+        )
+
+        canvas.drawLine(
+            pageSettings.marginLeft,
+            pageSettings.marginTop,
+            pageSettings.marginLeft,
+            height - pageSettings.marginBottom,
+            marginPaint
+        )
+    }
+
+    private fun drawPageNumber(canvas: Canvas, pageNum: Int, pageSettings: PageSettings) {
+        val (width, height) = getPageSize(pageSettings.pageSize)
+        canvas.drawText(
+            "Page $pageNum",
+            width - pageSettings.marginRight,
+            height - pageSettings.marginBottom + 20f,
+            pageNumberPaint
+        )
+    }
+
+    private fun drawGlyph(
+        canvas: Canvas,
+        glyphLayout: GlyphLayout,
+        glyphsByChar: Map<String, Glyph>,
+        fontSize: Float
+    ) {
+        val color = Color.parseColor(glyphLayout.colorHex)
+
+        if (glyphLayout.glyph != null && glyphLayout.glyph.variants.isNotEmpty()) {
+            val variant = glyphLayout.glyph.variants.getOrNull(glyphLayout.variantIndex)
+                ?: glyphLayout.glyph.variants.firstOrNull()
+            if (variant?.vectorCommands?.isNotEmpty() == true) {
+                drawVectorGlyph(canvas, variant, glyphLayout, color, fontSize)
+                return
+            }
+            if (variant?.alphaMaskBitmap != null) {
+                drawBitmapGlyph(canvas, variant, glyphLayout, color, fontSize)
+                return
+            }
+        }
+
+        drawFallbackGlyph(canvas, glyphLayout.char, glyphLayout, color, fontSize)
+    }
+
+    private fun drawVectorGlyph(
+        canvas: Canvas,
+        variant: com.app.inktwin.core.glyph.GlyphVariant,
+        glyphLayout: GlyphLayout,
+        color: Int,
+        fontSize: Float
+    ) {
+        val path = android.graphics.Path()
+        val scale = fontSize / 1000f
+
+        for (cmd in variant.vectorCommands) {
+            when (cmd.type) {
+                "moveTo" -> path.moveTo(cmd.points[0] * scale + glyphLayout.x, cmd.points[1] * scale + glyphLayout.y - fontSize)
+                "lineTo" -> path.lineTo(cmd.points[0] * scale + glyphLayout.x, cmd.points[1] * scale + glyphLayout.y - fontSize)
+                "quadTo" -> path.quadTo(
+                    cmd.points[0] * scale + glyphLayout.x,
+                    cmd.points[1] * scale + glyphLayout.y - fontSize,
+                    cmd.points[2] * scale + glyphLayout.x,
+                    cmd.points[3] * scale + glyphLayout.y - fontSize
+                )
+                "cubicTo" -> path.cubicTo(
+                    cmd.points[0] * scale + glyphLayout.x,
+                    cmd.points[1] * scale + glyphLayout.y - fontSize,
+                    cmd.points[2] * scale + glyphLayout.x,
+                    cmd.points[3] * scale + glyphLayout.y - fontSize,
+                    cmd.points[4] * scale + glyphLayout.x,
+                    cmd.points[5] * scale + glyphLayout.y - fontSize
+                )
+                "close" -> path.close()
+            }
+        }
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = fontSize * 0.08f
+        }
+        canvas.drawPath(path, paint)
+    }
+
+    private fun drawBitmapGlyph(
+        canvas: Canvas,
+        variant: com.app.inktwin.core.glyph.GlyphVariant,
+        glyphLayout: GlyphLayout,
+        color: Int,
+        fontSize: Float
+    ) {
+        val alphaMask = variant.alphaMaskBitmap ?: return
+        val drawHeight = fontSize * 1.15f
+        val scale = drawHeight / alphaMask.height
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            colorFilter = PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
+        }
+
+        val dstRect = RectF(
+            glyphLayout.x,
+            glyphLayout.y - fontSize,
+            glyphLayout.x + alphaMask.width * scale,
+            glyphLayout.y
+        )
+
+        canvas.drawBitmap(alphaMask, null, dstRect, paint)
+    }
+
+    private fun drawFallbackGlyph(
+        canvas: Canvas,
+        char: Char,
+        glyphLayout: GlyphLayout,
+        color: Int,
+        fontSize: Float
+    ) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            textSize = fontSize
+            typeface = fallbackTypeface
+        }
+
+        canvas.drawText(char.toString(), glyphLayout.x, glyphLayout.y, paint)
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\repository\RepositoryImpl.kt ===
+package com.app.inktwin.data.repository
+
+import com.app.inktwin.core.glyph.Glyph
+import com.app.inktwin.core.glyph.GlyphVariant
+import com.app.inktwin.core.glyph.PathCommand
+import com.app.inktwin.core.note.NoteDraft
+import com.app.inktwin.core.profile.HandwritingProfile
+import com.app.inktwin.core.profile.SourceType
+import com.app.inktwin.data.room.GlyphEntity
+import com.app.inktwin.data.room.GlyphVariantEntity
+import com.app.inktwin.data.room.HandwritingProfileEntity
+import com.app.inktwin.data.room.InkTwinDatabase
+import com.app.inktwin.data.room.NoteDraftEntity
+import com.app.inktwin.data.room.converters.PathListConverter
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+private val pathListConverter = PathListConverter()
+
+private fun bitmapToBlob(bitmap: android.graphics.Bitmap?): ByteArray? {
+    return bitmap?.let {
+        val stream = java.io.ByteArrayOutputStream()
+        it.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+        stream.toByteArray()
+    }
+}
+
+private fun blobToBitmap(blob: ByteArray?): android.graphics.Bitmap? {
+    return blob?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }
+}
+
+class HandwritingProfileRepositoryImpl(private val database: InkTwinDatabase) : HandwritingProfileRepository {
+
+    override fun observeActiveProfile(): Flow<HandwritingProfile?> {
+        return database.handwritingProfileDao().getActiveProfile().map { entity ->
+            entity?.toDomainModel()
+        }
+    }
+
+    override fun observeAllProfiles(): Flow<List<HandwritingProfile>> {
+        return database.handwritingProfileDao().getAllProfiles().map { entities ->
+            entities.map { it.toDomainModel() }
+        }
+    }
+
+    override suspend fun createProfile(name: String, sourceType: SourceType): Long {
+        val entity = HandwritingProfileEntity(
+            name = name,
+            sourceType = sourceType.value,
+            isActive = true
+        )
+        return database.handwritingProfileDao().insert(entity)
+    }
+
+    override suspend fun updateProfile(profile: HandwritingProfile) {
+        val entity = profile.toEntity()
+        database.handwritingProfileDao().update(entity)
+    }
+
+    override suspend fun deleteProfile(id: Long) {
+        database.handwritingProfileDao().deleteById(id)
+    }
+
+    override suspend fun setActiveProfile(id: Long) {
+        database.handwritingProfileDao().deactivateAll()
+        database.handwritingProfileDao().setActive(id, System.currentTimeMillis())
+    }
+
+    private fun HandwritingProfileEntity.toDomainModel(): HandwritingProfile {
+        return HandwritingProfile(
+            id = id,
+            name = name,
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            sourceType = SourceType.fromValue(sourceType),
+            isActive = isActive
+        )
+    }
+
+    private fun HandwritingProfile.toEntity(): HandwritingProfileEntity {
+        return HandwritingProfileEntity(
+            id = id,
+            name = name,
+            createdAt = createdAt,
+            updatedAt = System.currentTimeMillis(),
+            sourceType = sourceType.value,
+            isActive = isActive
+        )
+    }
+}
+
+class GlyphRepositoryImpl(private val database: InkTwinDatabase) : GlyphRepository {
+
+    override fun observeGlyphs(profileId: Long): Flow<List<Glyph>> {
+        return database.glyphDao().getWithVariants(profileId).map { glyphsWithVariants ->
+            glyphsWithVariants.map { gv ->
+                val variants = gv.variants.map { ve ->
+                    val commands = if (ve.vectorCommandsJson != null && ve.vectorCommandsJson.isNotBlank()) {
+                        pathListConverter.fromJson(ve.vectorCommandsJson)
+                    } else emptyList<PathCommand>()
+
+                    GlyphVariant(
+                        variantIndex = ve.variantIndex,
+                        vectorCommands = commands,
+                        alphaMaskBitmap = blobToBitmap(ve.alphaMaskBlob),
+                        bitmapWidth = ve.bitmapWidth,
+                        bitmapHeight = ve.bitmapHeight,
+                        advanceWidth = ve.advanceWidth,
+                        leftBearing = ve.leftBearing,
+                        topBearing = ve.topBearing,
+                        ascent = ve.ascent,
+                        descent = ve.descent
+                    )
+                }
+
+                Glyph(
+                    character = gv.glyph.character,
+                    unicode = gv.glyph.unicode,
+                    variants = variants,
+                    isFallback = gv.glyph.isFallback
+                )
+            }
+        }
+    }
+
+    override suspend fun saveGlyphs(profileId: Long, glyphs: List<Glyph>) {
+        // Delete existing glyphs for this profile
+        database.glyphDao().deleteByProfileId(profileId)
+        
+        // Insert new glyphs and variants
+        for (glyph in glyphs) {
+            val glyphEntity = GlyphEntity(
+                profileId = profileId,
+                character = glyph.character,
+                unicode = glyph.unicode,
+                isFallback = glyph.isFallback
+            )
+            val glyphId = database.glyphDao().insert(glyphEntity)
+            
+            val variantEntities = glyph.variants.mapIndexed { index, variant ->
+                GlyphVariantEntity(
+                    glyphId = glyphId,
+                    variantIndex = index,
+                    vectorCommandsJson = if (variant.vectorCommands.isNotEmpty()) {
+                        pathListConverter.toJson(variant.vectorCommands)
+                    } else null,
+                    alphaMaskBlob = bitmapToBlob(variant.alphaMaskBitmap),
+                    bitmapWidth = variant.bitmapWidth,
+                    bitmapHeight = variant.bitmapHeight,
+                    advanceWidth = variant.advanceWidth,
+                    leftBearing = variant.leftBearing,
+                    topBearing = variant.topBearing,
+                    ascent = variant.ascent,
+                    descent = variant.descent
+                )
+            }
+            database.glyphVariantDao().insertAll(variantEntities)
+        }
+    }
+
+    override suspend fun deleteGlyphs(profileId: Long) {
+        database.glyphDao().deleteByProfileId(profileId)
+    }
+}
+
+class NoteDraftRepositoryImpl(private val database: InkTwinDatabase) : NoteDraftRepository {
+
+    override fun observeDrafts(profileId: Long?): Flow<List<NoteDraft>> {
+        val dao = database.noteDraftDao()
+        return if (profileId != null) {
+            dao.getByProfileId(profileId).map { entities ->
+                entities.map { it.toDomainModel() }
+            } as Flow<List<NoteDraft>>
+        } else {
+            dao.getAllDrafts().map { entities ->
+                entities.map { it.toDomainModel() }
+            } as Flow<List<NoteDraft>>
+        }
+    }
+
+    override suspend fun createDraft(draft: NoteDraft): Long {
+        val entity = draft.toEntity()
+        return database.noteDraftDao().insert(entity)
+    }
+
+    override suspend fun updateDraft(draft: NoteDraft) {
+        val entity = draft.toEntity().copy(updatedAt = System.currentTimeMillis())
+        database.noteDraftDao().update(entity)
+    }
+
+    override suspend fun deleteDraft(id: Long) {
+        database.noteDraftDao().deleteById(id)
+    }
+
+    private fun NoteDraftEntity.toDomainModel(): NoteDraft {
+        return NoteDraft(
+            id = id,
+            profileId = profileId,
+            title = title,
+            plainText = plainText,
+            colorSpans = colorSpans,
+            pageSettings = pageSettings,
+            createdAt = createdAt,
+            updatedAt = updatedAt
+        )
+    }
+
+    private fun NoteDraft.toEntity(): NoteDraftEntity {
+        return NoteDraftEntity(
+            id = id,
+            profileId = profileId,
+            title = title,
+            plainText = plainText,
+            colorSpans = colorSpans,
+            pageSettings = pageSettings,
+            createdAt = createdAt,
+            updatedAt = updatedAt
+        )
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\repository\RepositoryInterfaces.kt ===
+package com.app.inktwin.data.repository
+
+import com.app.inktwin.core.glyph.Glyph
+import com.app.inktwin.core.profile.HandwritingProfile
+import com.app.inktwin.core.profile.SourceType
+import com.app.inktwin.core.note.NoteDraft
+import kotlinx.coroutines.flow.Flow
+
+interface HandwritingProfileRepository {
+    fun observeActiveProfile(): Flow<HandwritingProfile?>
+    fun observeAllProfiles(): Flow<List<HandwritingProfile>>
+    suspend fun createProfile(name: String, sourceType: SourceType): Long
+    suspend fun updateProfile(profile: HandwritingProfile)
+    suspend fun deleteProfile(id: Long)
+    suspend fun setActiveProfile(id: Long)
+}
+
+interface GlyphRepository {
+    fun observeGlyphs(profileId: Long): Flow<List<Glyph>>
+    suspend fun saveGlyphs(profileId: Long, glyphs: List<Glyph>)
+    suspend fun deleteGlyphs(profileId: Long)
+}
+
+interface NoteDraftRepository {
+    fun observeDrafts(profileId: Long?): Flow<List<NoteDraft>>
+    suspend fun createDraft(draft: NoteDraft): Long
+    suspend fun updateDraft(draft: NoteDraft)
+    suspend fun deleteDraft(id: Long)
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\converters\BitmapConverter.kt ===
+package com.app.inktwin.data.room.converters
+
+import androidx.room.TypeConverter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Base64
+import java.io.ByteArrayOutputStream
+
+class BitmapConverter {
+
+    @TypeConverter
+    fun fromBlob(blob: ByteArray?): Bitmap? {
+        return blob?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+
+    @TypeConverter
+    fun toBlob(bitmap: Bitmap?): ByteArray? {
+        return bitmap?.let { bmp ->
+            val stream = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            stream.toByteArray()
+        }
+    }
+
+    // Alternative: Base64 string for easier debugging
+    @TypeConverter
+    fun fromBase64(base64: String?): Bitmap? {
+        return base64?.let {
+            val decoded = Base64.decode(it, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(decoded, 0, decoded.size)
+        }
+    }
+
+    @TypeConverter
+    fun toBase64(bitmap: Bitmap?): String? {
+        return bitmap?.let { bmp ->
+            val stream = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            Base64.encodeToString(stream.toByteArray(), Base64.DEFAULT)
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\converters\ColorSpanListConverter.kt ===
+package com.app.inktwin.data.room.converters
+
+import androidx.room.TypeConverter
+import com.app.inktwin.core.note.ColorSpan
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+class ColorSpanListConverter {
+
+    @TypeConverter
+    fun fromJson(json: String?): List<ColorSpan> {
+        return json?.let { Json.decodeFromString<List<ColorSpan>>(it) } ?: emptyList()
+    }
+
+    @TypeConverter
+    fun toJson(spans: List<ColorSpan>?): String? {
+        return spans?.let { Json.encodeToString(it) }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\converters\PageSettingsConverter.kt ===
+package com.app.inktwin.data.room.converters
+
+import androidx.room.TypeConverter
+import com.app.inktwin.core.note.PageSettings
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+class PageSettingsConverter {
+
+    @TypeConverter
+    fun fromJson(json: String?): PageSettings {
+        return json?.let { Json.decodeFromString<PageSettings>(it) } ?: PageSettings()
+    }
+
+    @TypeConverter
+    fun toJson(settings: PageSettings?): String? {
+        return settings?.let { Json.encodeToString(it) }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\converters\PathListConverter.kt ===
+package com.app.inktwin.data.room.converters
+
+import androidx.room.TypeConverter
+import com.app.inktwin.core.glyph.PathCommand
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+class PathListConverter {
+
+    @TypeConverter
+    fun fromJson(json: String?): List<PathCommand> {
+        return json?.let { Json.decodeFromString<List<PathCommand>>(it) } ?: emptyList()
+    }
+
+    @TypeConverter
+    fun toJson(commands: List<PathCommand>?): String? {
+        return commands?.let { Json.encodeToString<List<PathCommand>>(it) }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\GlyphDao.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Transaction
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface GlyphDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(glyph: GlyphEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(glyphs: List<GlyphEntity>): List<Long>
+
+    @Query("SELECT * FROM glyphs WHERE profile_id = :profileId ORDER BY character")
+    fun getByProfileId(profileId: Long): Flow<List<GlyphEntity>>
+
+    @Query("SELECT * FROM glyphs WHERE profile_id = :profileId AND character = :character")
+    fun getByProfileAndCharacter(profileId: Long, character: String): Flow<GlyphEntity?>
+
+    @Query("SELECT * FROM glyphs WHERE id = :id")
+    fun getById(id: Long): Flow<GlyphEntity?>
+
+    @Query("DELETE FROM glyphs WHERE profile_id = :profileId")
+    suspend fun deleteByProfileId(profileId: Long): Int
+
+    @Query("DELETE FROM glyphs WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
+
+    @Transaction
+    @Query("SELECT * FROM glyphs WHERE profile_id = :profileId ORDER BY character")
+    fun getWithVariants(profileId: Long): Flow<List<GlyphWithVariants>>
+
+    @Query("SELECT COUNT(*) FROM glyphs WHERE profile_id = :profileId AND is_fallback = 0")
+    fun getCapturedCount(profileId: Long): Flow<Int>
+}
+
+data class GlyphWithVariants(
+    @androidx.room.Embedded val glyph: GlyphEntity,
+    @androidx.room.Relation(
+        parentColumn = "id",
+        entityColumn = "glyph_id",
+        entity = GlyphVariantEntity::class
+    ) val variants: List<GlyphVariantEntity>
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\GlyphEntity.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
+
+@Entity(
+    tableName = "glyphs",
+    foreignKeys = [
+        ForeignKey(
+            entity = HandwritingProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["profile_id"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index(value = ["profile_id", "character"], unique = true)]
+)
+@Serializable
+data class GlyphEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "profile_id") val profileId: Long,
+    @ColumnInfo(name = "character") val character: String, // Single character: "a", "Z", "5", "."
+    @ColumnInfo(name = "unicode") val unicode: Int,
+    @ColumnInfo(name = "is_fallback") val isFallback: Boolean = false, // True if from bundled font
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\GlyphVariantDao.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface GlyphVariantDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(variant: GlyphVariantEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(variants: List<GlyphVariantEntity>): List<Long>
+
+    @Query("SELECT * FROM glyph_variants WHERE glyph_id = :glyphId ORDER BY variant_index")
+    fun getByGlyphId(glyphId: Long): Flow<List<GlyphVariantEntity>>
+
+    @Query("SELECT * FROM glyph_variants WHERE glyph_id = :glyphId AND variant_index = :index")
+    fun getByGlyphIdAndIndex(glyphId: Long, index: Int): Flow<GlyphVariantEntity?>
+
+    @Query("SELECT * FROM glyph_variants WHERE id = :id")
+    fun getById(id: Long): Flow<GlyphVariantEntity?>
+
+    @Query("DELETE FROM glyph_variants WHERE glyph_id = :glyphId")
+    suspend fun deleteByGlyphId(glyphId: Long): Int
+
+    @Query("DELETE FROM glyph_variants WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
+
+    @Query("SELECT MAX(variant_index) FROM glyph_variants WHERE glyph_id = :glyphId")
+    fun getMaxVariantIndex(glyphId: Long): Flow<Int?>
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\GlyphVariantEntity.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import androidx.room.TypeConverters
+import com.app.inktwin.data.room.converters.PathListConverter
+import com.app.inktwin.data.room.converters.BitmapConverter
+import kotlinx.serialization.Serializable
+
+@Entity(
+    tableName = "glyph_variants",
+    foreignKeys = [
+        ForeignKey(
+            entity = GlyphEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["glyph_id"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("glyph_id")]
+)
+@Serializable
+data class GlyphVariantEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "glyph_id") val glyphId: Long,
+    @ColumnInfo(name = "variant_index") val variantIndex: Int, // 0 = primary, 1+ = alternates
+    // Vector path data (Mode A - Draw) - stored as JSON-serialized PathCommand list
+    @ColumnInfo(name = "vector_commands_json") val vectorCommandsJson: String? = null,
+    // Alpha-mask bitmap (Mode B - Scan) - stored as compressed PNG bytes
+    @ColumnInfo(name = "alpha_mask_blob") val alphaMaskBlob: ByteArray? = null,
+    @ColumnInfo(name = "bitmap_width") val bitmapWidth: Int = 0,
+    @ColumnInfo(name = "bitmap_height") val bitmapHeight: Int = 0,
+    // Metrics (normalized to em-square 1000x1000 for vector, or pixels for bitmap)
+    @ColumnInfo(name = "advance_width") val advanceWidth: Float = 0f,
+    @ColumnInfo(name = "left_bearing") val leftBearing: Float = 0f,
+    @ColumnInfo(name = "top_bearing") val topBearing: Float = 0f,
+    @ColumnInfo(name = "ascent") val ascent: Float = 0f,
+    @ColumnInfo(name = "descent") val descent: Float = 0f,
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+) {
+    fun hasVectorData(): Boolean = vectorCommandsJson != null && vectorCommandsJson.isNotBlank()
+    fun hasBitmapData(): Boolean = alphaMaskBlob != null && alphaMaskBlob.isNotEmpty()
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\HandwritingProfileDao.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface HandwritingProfileDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(profile: HandwritingProfileEntity): Long
+
+    @Update
+    suspend fun update(profile: HandwritingProfileEntity): Int
+
+    @Query("DELETE FROM handwriting_profiles WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
+
+    @Query("SELECT * FROM handwriting_profiles WHERE id = :id")
+    fun getById(id: Long): Flow<HandwritingProfileEntity?>
+
+    @Query("SELECT * FROM handwriting_profiles WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1")
+    fun getActiveProfile(): Flow<HandwritingProfileEntity?>
+
+    @Query("SELECT * FROM handwriting_profiles ORDER BY updated_at DESC")
+    fun getAllProfiles(): Flow<List<HandwritingProfileEntity>>
+
+    @Query("UPDATE handwriting_profiles SET is_active = 0 WHERE is_active = 1")
+    suspend fun deactivateAll(): Int
+
+    @Query("UPDATE handwriting_profiles SET is_active = 1, updated_at = :now WHERE id = :id")
+    suspend fun setActive(id: Long, now: Long): Int
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\HandwritingProfileEntity.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
+
+@Entity(tableName = "handwriting_profiles")
+@Serializable
+data class HandwritingProfileEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "name") val name: String = "Default",
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    @ColumnInfo(name = "source_type") val sourceType: Int = 0, // 0 = Draw, 1 = Scan, 2 = Merged
+    @ColumnInfo(name = "is_active") val isActive: Boolean = true
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\InkTwinDatabase.kt ===
+package com.app.inktwin.data.room
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
+import com.app.inktwin.data.room.converters.BitmapConverter
+import com.app.inktwin.data.room.converters.ColorSpanListConverter
+import com.app.inktwin.data.room.converters.PageSettingsConverter
+import com.app.inktwin.data.room.converters.PathListConverter
+
+@Database(
+    entities = [
+        HandwritingProfileEntity::class,
+        GlyphEntity::class,
+        GlyphVariantEntity::class,
+        NoteDraftEntity::class
+    ],
+    version = 1,
+    exportSchema = false
+)
+@TypeConverters(
+    PathListConverter::class,
+    BitmapConverter::class,
+    ColorSpanListConverter::class,
+    PageSettingsConverter::class
+)
+abstract class InkTwinDatabase : RoomDatabase() {
+
+    abstract fun handwritingProfileDao(): HandwritingProfileDao
+    abstract fun glyphDao(): GlyphDao
+    abstract fun glyphVariantDao(): GlyphVariantDao
+    abstract fun noteDraftDao(): NoteDraftDao
+
+    companion object {
+        @Volatile private var INSTANCE: InkTwinDatabase? = null
+
+        fun getInstance(context: Context): InkTwinDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    InkTwinDatabase::class.java,
+                    "inktwin_database"
+                ).fallbackToDestructiveMigration()
+                    .build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\NoteDraftDao.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface NoteDraftDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(draft: NoteDraftEntity): Long
+
+    @Update
+    suspend fun update(draft: NoteDraftEntity): Int
+
+    @Query("SELECT * FROM note_drafts WHERE id = :id")
+    fun getById(id: Long): Flow<NoteDraftEntity?>
+
+    @Query("SELECT * FROM note_drafts WHERE profile_id = :profileId ORDER BY updated_at DESC")
+    fun getByProfileId(profileId: Long): Flow<List<NoteDraftEntity>>
+
+    @Query("SELECT * FROM note_drafts ORDER BY updated_at DESC")
+    fun getAllDrafts(): Flow<List<NoteDraftEntity>>
+
+    @Query("DELETE FROM note_drafts WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
+
+    @Query("DELETE FROM note_drafts WHERE profile_id = :profileId")
+    suspend fun deleteByProfileId(profileId: Long): Int
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\data\room\NoteDraftEntity.kt ===
+package com.app.inktwin.data.room
+
+import androidx.room.ColumnInfo
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import androidx.room.TypeConverters
+import com.app.inktwin.data.room.converters.ColorSpanListConverter
+import com.app.inktwin.data.room.converters.PageSettingsConverter
+import kotlinx.serialization.Serializable
+
+@Entity(
+    tableName = "note_drafts",
+    foreignKeys = [
+        ForeignKey(
+            entity = HandwritingProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["profile_id"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ],
+    indices = [Index("profile_id")]
+)
+@Serializable
+@TypeConverters(ColorSpanListConverter::class, PageSettingsConverter::class)
+data class NoteDraftEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @ColumnInfo(name = "profile_id") val profileId: Long? = null,
+    @ColumnInfo(name = "title") val title: String = "Untitled Note",
+    @ColumnInfo(name = "plain_text") val plainText: String = "",
+    @ColumnInfo(name = "color_spans_json") val colorSpans: List<com.app.inktwin.core.note.ColorSpan> = emptyList(),
+    @ColumnInfo(name = "page_settings_json") val pageSettings: com.app.inktwin.core.note.PageSettings = com.app.inktwin.core.note.PageSettings(),
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\di\DatabaseModule.kt ===
+package com.app.inktwin.di
+
+import android.content.Context
+import com.app.inktwin.data.room.InkTwinDatabase
+import com.app.inktwin.data.repository.GlyphRepository
+import com.app.inktwin.data.repository.GlyphRepositoryImpl
+import com.app.inktwin.data.repository.HandwritingProfileRepository
+import com.app.inktwin.data.repository.HandwritingProfileRepositoryImpl
+import com.app.inktwin.data.repository.NoteDraftRepository
+import com.app.inktwin.data.repository.NoteDraftRepositoryImpl
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import dagger.hilt.android.qualifiers.ApplicationContext
+import javax.inject.Singleton
+
+@Module
+@InstallIn(SingletonComponent::class)
+object DatabaseModule {
+
+    @Provides
+    @Singleton
+    fun provideDatabase(@ApplicationContext context: Context): InkTwinDatabase {
+        return InkTwinDatabase.getInstance(context)
+    }
+
+    @Provides
+    @Singleton
+    fun provideHandwritingProfileRepository(database: InkTwinDatabase): HandwritingProfileRepository {
+        return HandwritingProfileRepositoryImpl(database)
+    }
+
+    @Provides
+    @Singleton
+    fun provideGlyphRepository(database: InkTwinDatabase): GlyphRepository {
+        return GlyphRepositoryImpl(database)
+    }
+
+    @Provides
+    @Singleton
+    fun provideNoteDraftRepository(database: InkTwinDatabase): NoteDraftRepository {
+        return NoteDraftRepositoryImpl(database)
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\navigation\NavigationGraph.kt ===
+package com.app.inktwin.ui.navigation
+
+import androidx.navigation.NavController
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.navigation
+import com.app.inktwin.ui.screen.capture.CaptureScreen
+import com.app.inktwin.ui.screen.editor.EditorScreen
+import com.app.inktwin.ui.screen.preview.PreviewScreen
+
+const val CAPTURE_ROUTE = "capture"
+const val EDITOR_ROUTE = "editor"
+const val PREVIEW_ROUTE = "preview"
+
+fun NavGraphBuilder.inkTwinNavGraph(navController: NavController) {
+    navigation(
+        startDestination = CAPTURE_ROUTE,
+        route = "inktwin_nav_graph"
+    ) {
+        composable(CAPTURE_ROUTE) {
+            CaptureScreen(
+                onNavigateToEditor = {
+                    navController.navigate(EDITOR_ROUTE)
+                }
+            )
+        }
+        composable(EDITOR_ROUTE) {
+            EditorScreen(
+                onNavigateToPreview = {
+                    navController.navigate(PREVIEW_ROUTE)
+                }
+            )
+        }
+        composable(PREVIEW_ROUTE) {
+            PreviewScreen()
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\capture\CaptureScreen.kt ===
+package com.app.inktwin.ui.screen.capture
+
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.app.inktwin.core.glyph.PathCommand
+import com.app.inktwin.core.pipeline.ScannedCharCandidate
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CaptureScreen(
+    onNavigateToEditor: () -> Unit,
+    viewModel: CaptureViewModel = hiltViewModel()
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    val currentCategory by viewModel.currentCategory.collectAsState()
+    val currentStrokes by viewModel.currentStrokes.collectAsState()
+
+    val currentChar = uiState.currentChar
+    val progressCount = uiState.progressCount
+    val totalLetters = uiState.totalLetters
+    val modeSwitch = uiState.modeSwitch
+
+    // Get characters for current category
+    val currentChars = currentCategory.chars.toList()
+
+    // Gallery launcher for multiple images
+    val context = LocalContext.current
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            // Convert URIs to Bitmaps on background thread
+            viewModel.viewModelScope.launch(Dispatchers.IO) {
+                val bitmaps = mutableListOf<Bitmap>()
+                for (uri in uris) {
+                    try {
+                        val inputStream = context.contentResolver.openInputStream(uri)
+                        inputStream?.use { stream ->
+                            val bitmap = android.graphics.BitmapFactory.decodeStream(stream)
+                            bitmap?.let { bitmaps.add(it) }
+                        }
+                    } catch (e: Exception) {
+                        // Ignore failed images
+                    }
+                }
+                if (bitmaps.isNotEmpty()) {
+                    viewModel.addScannedPages(bitmaps)
+                }
+            }
+        }
+    }
+
+    // Camera launcher
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview()
+    ) { bitmap: Bitmap? ->
+        bitmap?.let { viewModel.addScannedPages(listOf(it)) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        // Mode Switcher - 2 button toggle at top
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = { viewModel.setModeSwitch("draw") },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (modeSwitch == "draw") {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Draw 52 Letters")
+            }
+
+            Button(
+                onClick = { viewModel.setModeSwitch("scan") },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (modeSwitch == "scan") {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Scan Plain Paper")
+            }
+
+            Button(
+                onClick = onNavigateToEditor,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Text("Edit Note â†’")
+            }
+        }
+
+        if (modeSwitch == "draw") {
+            // Draw Mode - full capture UI
+            DrawModeContent(
+                uiState = uiState,
+                currentCategory = currentCategory,
+                currentChars = currentChars,
+                viewModel = viewModel,
+                progressCount = progressCount,
+                totalLetters = totalLetters,
+                currentChar = currentChar
+            )
+        } else {
+            // Scan Mode - full pipeline UI
+            ScanModeContent(
+                uiState = uiState,
+                viewModel = viewModel,
+                galleryLauncher = galleryLauncher,
+                cameraLauncher = cameraLauncher
+            )
+        }
+    }
+}
+
+@Composable
+fun DrawModeContent(
+    uiState: com.app.inktwin.ui.screen.capture.CaptureUiState,
+    currentCategory: CharacterCategory,
+    currentChars: List<Char>,
+    viewModel: CaptureViewModel,
+    progressCount: Int,
+    totalLetters: Int,
+    currentChar: Char
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Progress Header
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer,
+            shape = MaterialTheme.shapes.medium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Captured: $progressCount / $totalLetters letters",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "Active: '${currentChar}'",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+
+        // Category Tabs
+        CategoryTabs(
+            selectedCategory = currentCategory,
+            onCategorySelected = { viewModel.selectCategory(it) },
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Embedded DrawingPad
+        DrawingPad(
+            currentChar = currentChar,
+            progressCount = progressCount,
+            totalLetters = totalLetters,
+            capturedGlyphs = uiState.capturedGlyphs,
+            onStrokeComplete = { pathCommands: List<PathCommand> ->
+                // Sync strokes to ViewModel so saveCurrentStroke() can access them
+                viewModel.addStroke(pathCommands)
+            },
+            onUndo = { viewModel.undoLastStroke() },
+            onClear = { viewModel.clearStrokes() },
+            onPrevious = { viewModel.navigatePrevious() },
+            onNext = { viewModel.navigateNext() },
+            onSaveAndNext = { viewModel.saveCurrentStroke() },
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Captured Character Grid
+        Text(
+            text = "Character Library (${currentCategory.displayName})",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 8.dp)
+        )
+
+        CharacterGrid(
+            characters = currentChars,
+            capturedGlyphs = uiState.capturedGlyphs,
+            onCharSelected = { char ->
+                val index = currentChars.indexOf(char)
+                if (index >= 0) {
+                    viewModel.setCurrentCharIndex(index)
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 300.dp)
+        )
+    }
+}
+
+@Composable
+fun ScanModeContent(
+    uiState: com.app.inktwin.ui.screen.capture.CaptureUiState,
+    viewModel: CaptureViewModel,
+    galleryLauncher: androidx.activity.compose.ManagedActivityResultLauncher<String, List<Uri>>,
+    cameraLauncher: androidx.activity.compose.ManagedActivityResultLauncher<Void?, Bitmap?>
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // Page Picker Bar
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Gallery")
+                            Spacer(Modifier.width(8.dp))
+                            Text("+ Add Pages")
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { cameraLauncher.launch(null) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Camera")
+                        }
+                    }
+                }
+
+                if (uiState.scannedPages.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "${uiState.scannedPages.size} page(s) queued",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // Threshold Slider & Scan Button
+        if (uiState.scannedPages.isNotEmpty()) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Threshold slider
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Threshold / Ink Contrast")
+                            Text(
+                                "%.2f".format(uiState.thresholdSensitivity),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Slider(
+                            value = uiState.thresholdSensitivity,
+                            onValueChange = { viewModel.setThresholdSensitivity(it) },
+                            valueRange = 0.05f..0.25f,
+                            steps = 20,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            "Lower = more sensitive to faint ink",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // Scan button
+                    Button(
+                        onClick = { if (!uiState.isScanning) viewModel.scanPages() },
+                        enabled = !uiState.isScanning,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (uiState.isScanning) {
+                            Row(
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text("Scanning... ${(uiState.scanProgress * 100).toInt()}%")
+                            }
+                        } else {
+                            Text("Scan & Extract Letters")
+                        }
+                    }
+                }
+            }
+
+            // Progress during scanning
+            if (uiState.isScanning) {
+                LinearProgressIndicator(
+                    progress = uiState.scanProgress,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+        }
+
+        // Verification Grid
+        if (uiState.scannedCandidates.isNotEmpty() && !uiState.isScanning) {
+            Spacer(Modifier.height(16.dp))
+
+            // Header with count
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${uiState.selectedCandidatesCount} of ${uiState.scannedCandidates.size} selected",
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
+            // Scrollable grid of candidates
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(100.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(400.dp),
+                contentPadding = PaddingValues(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(uiState.scannedCandidates) { candidate ->
+                    CandidateCard(
+                        candidate = candidate,
+                        onCharChange = { newChar ->
+                            viewModel.updateCandidateChar(candidate.id, newChar)
+                        },
+                        onSelectionToggle = {
+                            viewModel.toggleCandidateSelection(candidate.id)
+                        }
+                    )
+                }
+            }
+
+            // Bottom save bar
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = { viewModel.commitScannedCandidates() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Save ${uiState.selectedCandidatesCount} Verified Letters to Profile")
+            }
+        } else if (!uiState.isScanning && uiState.scannedPages.isNotEmpty()) {
+            // No candidates yet, prompt to scan
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                ),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "Ready to Scan",
+                        style = MaterialTheme.typography.headlineMedium
+                    )
+                    Text(
+                        text = "Adjust threshold if needed, then tap \"Scan & Extract Letters\"",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 16.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CandidateCard(
+    candidate: ScannedCharCandidate,
+    onCharChange: (String) -> Unit,
+    onSelectionToggle: () -> Unit
+) {
+    var textFieldValue by remember { mutableStateOf(TextFieldValue(candidate.proposedChar)) }
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (candidate.isSelected) {
+                MaterialTheme.colorScheme.surfaceContainerHigh
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerLowest
+            }
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Checkerboard background for transparency preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .background(
+                        Color.White,
+                        RectangleShape
+                    )
+            ) {
+                // Draw checkerboard pattern for transparency visualization
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val size = this.size
+                    val tileSize = 8f
+                    val cols = (size.width / tileSize).toInt() + 1
+                    val rows = (size.height / tileSize).toInt() + 1
+                    for (x in 0 until cols) {
+                        for (y in 0 until rows) {
+                            if ((x + y) % 2 == 0) {
+                                drawRect(
+                                    color = Color(0xFFE0E0E0),
+                                    topLeft = Offset(x * tileSize, y * tileSize),
+                                    size = Size(tileSize, tileSize)
+                                )
+                            }
+                        }
+                    }
+
+                    // Candidate alpha mask
+                    candidate.alphaMask.asImageBitmap()?.let { imageBitmap ->
+                        drawImage(imageBitmap)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            // Character label + edit
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = candidate.isSelected,
+                    onCheckedChange = { _ -> onSelectionToggle() }
+                )
+
+                OutlinedTextField(
+                    value = textFieldValue,
+                    onValueChange = { textFieldValue = it },
+                    modifier = Modifier.width(50.dp),
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.labelLarge,
+                    label = { Text("Char") },
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                        focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                        unfocusedIndicatorColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\capture\CaptureViewModel.kt ===
+package com.app.inktwin.ui.screen.capture
+
+import android.graphics.Bitmap
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.app.inktwin.core.glyph.PathCommand
+import com.app.inktwin.core.glyph.Glyph
+import com.app.inktwin.core.glyph.GlyphNormalizer
+import com.app.inktwin.core.glyph.GlyphVariant
+import com.app.inktwin.core.pipeline.PlainPaperScanner
+import com.app.inktwin.core.pipeline.ScannedCharCandidate
+import com.app.inktwin.core.profile.HandwritingProfile
+import com.app.inktwin.core.profile.SourceType
+import com.app.inktwin.data.repository.GlyphRepository
+import com.app.inktwin.data.repository.HandwritingProfileRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import javax.inject.Inject
+
+// Safe character sets as simple strings
+const val LOWERCASE_CHARS = "abcdefghijklmnopqrstuvwxyz"
+const val UPPERCASE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const val OPTIONAL_CHARS = "0123456789.,?!-:;'()"
+
+data class CharacterCategory(
+    val name: String,
+    val chars: String,
+    val displayName: String
+) {
+    companion object {
+        val LOWERCASE = CharacterCategory("lowercase", LOWERCASE_CHARS, "a-z")
+        val UPPERCASE = CharacterCategory("uppercase", UPPERCASE_CHARS, "A-Z")
+        val OPTIONAL = CharacterCategory("optional", OPTIONAL_CHARS, "0-9 & .")
+        val ALL = listOf(LOWERCASE, UPPERCASE, OPTIONAL)
+    }
+}
+
+data class CaptureUiState(
+    val activeProfile: HandwritingProfile? = null,
+    val currentCharIndex: Int = 0,
+    val selectedCategory: CharacterCategory = CharacterCategory.LOWERCASE,
+    val capturedGlyphs: List<Glyph> = emptyList(),
+    val isSaving: Boolean = false,
+    val modeSwitch: String = "draw", // "draw" or "scan"
+    // Mode B - Scan state
+    val scannedPages: List<Bitmap> = emptyList(),
+    val isScanning: Boolean = false,
+    val scanProgress: Float = 0f,
+    val thresholdSensitivity: Float = 0.15f,
+    val scannedCandidates: List<ScannedCharCandidate> = emptyList()
+) {
+    val currentChar: Char
+        get() {
+            val chars = selectedCategory.chars
+            return if (chars.isNotEmpty()) {
+                chars[currentCharIndex.coerceIn(0, chars.length - 1)]
+            } else {
+                'a'
+            }
+        }
+
+    val progressCount: Int
+        get() = capturedGlyphs.count { it.variants.isNotEmpty() }
+
+    val totalLetters: Int = 52 // a-z + A-Z
+
+    val selectedCandidatesCount: Int
+        get() = scannedCandidates.count { it.isSelected }
+}
+
+@HiltViewModel
+class CaptureViewModel @Inject constructor(
+    private val profileRepository: HandwritingProfileRepository,
+    private val glyphRepository: GlyphRepository
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(CaptureUiState())
+    val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
+
+    private val _currentCategory = MutableStateFlow(CharacterCategory.LOWERCASE)
+    val currentCategory: StateFlow<CharacterCategory> = _currentCategory.asStateFlow()
+
+    // Exposed stroke data for DrawingPad (Mode A)
+    private val _currentStrokes = MutableStateFlow<List<List<PathCommand>>>(emptyList())
+    val currentStrokes: StateFlow<List<List<PathCommand>>> = _currentStrokes.asStateFlow()
+
+    init {
+        ensureActiveProfile()
+        observeProfileAndGlyphs()
+    }
+
+    private fun ensureActiveProfile() {
+        viewModelScope.launch {
+            val profile = profileRepository.observeActiveProfile().firstOrNull()
+            if (profile == null) {
+                createDefaultProfile()
+            } else {
+                _uiState.update { it.copy(activeProfile = profile) }
+            }
+        }
+    }
+
+    private suspend fun createDefaultProfile() {
+        try {
+            val id = profileRepository.createProfile("Default Profile", SourceType.DRAW)
+            profileRepository.setActiveProfile(id)
+            val newProfile = profileRepository.observeActiveProfile().firstOrNull()
+            _uiState.update { it.copy(activeProfile = newProfile) }
+        } catch (e: Exception) {
+            // Handle error silently for now
+        }
+    }
+
+    private fun observeProfileAndGlyphs() {
+        viewModelScope.launch {
+            profileRepository.observeActiveProfile()
+                .flatMapLatest { profile ->
+                    _uiState.update { it.copy(activeProfile = profile) }
+                    profile?.let {
+                        glyphRepository.observeGlyphs(it.id)
+                    } ?: kotlinx.coroutines.flow.flowOf(emptyList())
+                }
+                .collect { glyphs ->
+                    _uiState.update { state -> state.copy(capturedGlyphs = glyphs) }
+                }
+        }
+    }
+
+    fun selectCategory(category: CharacterCategory) {
+        _currentCategory.value = category
+        _uiState.update { it.copy(selectedCategory = category, currentCharIndex = 0) }
+    }
+
+    fun setModeSwitch(mode: String) {
+        _uiState.update { it.copy(modeSwitch = mode) }
+        // Clear scan candidates when switching modes
+        if (mode == "draw") {
+            _uiState.update { it.copy(scannedCandidates = emptyList()) }
+        }
+    }
+
+    fun setCurrentCharIndex(index: Int) {
+        val maxIndex = _uiState.value.selectedCategory.chars.length - 1
+        _uiState.update { it.copy(currentCharIndex = index.coerceIn(0, maxIndex)) }
+    }
+
+    fun navigatePrevious() {
+        _uiState.update {
+            it.copy(currentCharIndex = (it.currentCharIndex - 1).coerceAtLeast(0))
+        }
+    }
+
+    fun navigateNext() {
+        val maxIndex = _uiState.value.selectedCategory.chars.length - 1
+        _uiState.update {
+            it.copy(currentCharIndex = (it.currentCharIndex + 1).coerceAtMost(maxIndex))
+        }
+    }
+
+    fun addStroke(stroke: List<PathCommand>) {
+        _currentStrokes.value = _currentStrokes.value + listOf(stroke)
+    }
+
+    fun undoLastStroke() {
+        val strokes = _currentStrokes.value
+        if (strokes.isNotEmpty()) {
+            _currentStrokes.value = strokes.dropLast(1)
+        }
+    }
+
+    fun clearStrokes() {
+        _currentStrokes.value = emptyList()
+    }
+
+    fun saveCurrentStroke() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true) }
+
+            val state = _uiState.value
+            val profileId = state.activeProfile?.id
+            val currentChar = state.currentChar
+
+            if (profileId != null && _currentStrokes.value.isNotEmpty()) {
+                // Convert strokes to PathCommands and normalize
+                val pathCommands = convertStrokesToPathCommands(_currentStrokes.value)
+                val normalizedResult = GlyphNormalizer.normalize(pathCommands)
+
+                // Get existing glyphs for this profile
+                val existingGlyphs = glyphRepository.observeGlyphs(profileId).firstOrNull() ?: emptyList()
+                val existingGlyph = existingGlyphs.find { it.character == currentChar.toString() }
+
+                if (existingGlyph != null) {
+                    // Add variant to existing glyph
+                    val newVariant = GlyphVariant(
+                        variantIndex = existingGlyph.variants.size,
+                        vectorCommands = normalizedResult.normalizedCommands,
+                        advanceWidth = normalizedResult.advanceWidth,
+                        leftBearing = normalizedResult.leftBearing,
+                        topBearing = 0f,
+                        ascent = normalizedResult.baselineY,
+                        descent = 1000f - normalizedResult.baselineY
+                    )
+                    val updatedGlyph = existingGlyph.copy(
+                        variants = existingGlyph.variants + newVariant
+                    )
+                    // Delete old and save updated
+                    glyphRepository.deleteGlyphs(profileId)
+                    val updatedList = existingGlyphs.filter { it.character != currentChar.toString() } + updatedGlyph
+                    glyphRepository.saveGlyphs(profileId, updatedList)
+                } else {
+                    // Create new glyph
+                    val newGlyph = Glyph(
+                        character = currentChar.toString(),
+                        unicode = currentChar.code,
+                        variants = listOf(
+                            GlyphVariant(
+                                variantIndex = 0,
+                                vectorCommands = normalizedResult.normalizedCommands,
+                                advanceWidth = normalizedResult.advanceWidth,
+                                leftBearing = normalizedResult.leftBearing,
+                                topBearing = 0f,
+                                ascent = normalizedResult.baselineY,
+                                descent = 1000f - normalizedResult.baselineY
+                            )
+                        )
+                    )
+                    val updatedList = existingGlyphs + newGlyph
+                    glyphRepository.saveGlyphs(profileId, updatedList)
+                }
+
+                // Clear strokes and move to next character
+                clearStrokes()
+                navigateNext()
+            }
+
+            _uiState.update { it.copy(isSaving = false) }
+        }
+    }
+
+    private fun convertStrokesToPathCommands(
+        strokes: List<List<PathCommand>>
+    ): List<PathCommand> {
+        // Flatten the list of PathCommand lists into a single list
+        return strokes.flatten()
+    }
+
+    // ============ MODE B: SCAN FUNCTIONS ============
+
+    fun addScannedPages(bitmaps: List<Bitmap>) {
+        _uiState.update { state ->
+            state.copy(scannedPages = state.scannedPages + bitmaps)
+        }
+    }
+
+    fun removeScannedPage(index: Int) {
+        _uiState.update { state ->
+            val newPages = state.scannedPages.toMutableList()
+            if (index in newPages.indices) {
+                newPages.removeAt(index)
+            }
+            state.copy(scannedPages = newPages)
+        }
+    }
+
+    fun clearScannedPages() {
+        _uiState.update { it.copy(scannedPages = emptyList(), scannedCandidates = emptyList()) }
+    }
+
+    fun setThresholdSensitivity(sensitivity: Float) {
+        _uiState.update { it.copy(thresholdSensitivity = sensitivity.coerceIn(0.05f, 0.25f)) }
+    }
+
+    fun scanPages() {
+        val pages = _uiState.value.scannedPages
+        val sensitivity = _uiState.value.thresholdSensitivity
+        if (pages.isEmpty()) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isScanning = true, scanProgress = 0f, scannedCandidates = emptyList()) }
+
+            val allCandidates = mutableListOf<ScannedCharCandidate>()
+
+            for ((pageIndex, page) in pages.withIndex()) {
+                // Binarize page
+                val binarized = PlainPaperScanner.binarizePage(page, sensitivity)
+
+                // Extract candidates
+                val candidates = PlainPaperScanner.extractCandidates(page, binarized)
+
+                // Assign proposed characters from recognized text
+                // ML Kit returns text in reading order; we assign sequentially
+                var charIndex = 0
+                val recognizedText = extractRecognizedText(page)
+                for (i in candidates.indices) {
+                    if (charIndex < recognizedText.length) {
+                        val c = recognizedText[charIndex]
+                        if (c.isLetterOrDigit() || !c.isLetterOrDigit() && !c.isWhitespace() || c.isWhitespace()) {
+                            // Only assign meaningful chars (letter, digit, or punctuation)
+                            if (!c.isWhitespace()) {
+                                allCandidates.add(candidates[i].copy(proposedChar = c.toString()))
+                                charIndex++
+                            } else {
+                                allCandidates.add(candidates[i])
+                            }
+                        } else {
+                            allCandidates.add(candidates[i])
+                        }
+                    } else {
+                        allCandidates.add(candidates[i])
+                    }
+                }
+
+                _uiState.update { it.copy(scanProgress = (pageIndex + 1).toFloat() / pages.size) }
+            }
+
+            _uiState.update { it.copy(isScanning = false, scannedCandidates = allCandidates) }
+        }
+    }
+
+    private suspend fun extractRecognizedText(bitmap: Bitmap): String {
+        val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(
+            com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS
+        )
+        val inputImage = com.google.mlkit.vision.common.InputImage.fromBitmap(bitmap, 0)
+        val result = recognizer.process(inputImage).await()
+        recognizer.close()
+        return result.text
+    }
+
+    fun updateCandidateChar(candidateId: String, newChar: String) {
+        _uiState.update { state ->
+            val newCandidates = state.scannedCandidates.map { candidate ->
+                if (candidate.id == candidateId) {
+                    candidate.copy(proposedChar = newChar)
+                } else {
+                    candidate
+                }
+            }
+            state.copy(scannedCandidates = newCandidates)
+        }
+    }
+
+    fun toggleCandidateSelection(candidateId: String) {
+        _uiState.update { state ->
+            val newCandidates = state.scannedCandidates.map { candidate ->
+                if (candidate.id == candidateId) {
+                    candidate.copy(isSelected = !candidate.isSelected)
+                } else {
+                    candidate
+                }
+            }
+            state.copy(scannedCandidates = newCandidates)
+        }
+    }
+
+    fun commitScannedCandidates() {
+        val state = _uiState.value
+        val profileId = state.activeProfile?.id
+        val selectedCandidates = state.scannedCandidates.filter { it.isSelected }
+        if (profileId == null || selectedCandidates.isEmpty()) return
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true) }
+
+            // Get existing glyphs
+            val existingGlyphs = glyphRepository.observeGlyphs(profileId).firstOrNull() ?: emptyList()
+            val updatedGlyphs = existingGlyphs.toMutableList()
+
+            for (candidate in selectedCandidates) {
+                val char = candidate.proposedChar
+                if (char.isEmpty()) continue
+
+                val existingIndex = updatedGlyphs.indexOfFirst { it.character == char }
+                val newVariant = candidate.toGlyphVariant(
+                    variantIndex = if (existingIndex >= 0) updatedGlyphs[existingIndex].variants.size else 0
+                )
+
+                // Limit to 5 variants per character
+                if (existingIndex >= 0) {
+                    val existingGlyph = updatedGlyphs[existingIndex]
+                    if (existingGlyph.variants.size < 5) {
+                        val updated = existingGlyph.copy(variants = existingGlyph.variants + newVariant)
+                        updatedGlyphs[existingIndex] = updated
+                    }
+                } else {
+                    val newGlyph = Glyph(
+                        character = char,
+                        unicode = char.first().code,
+                        variants = listOf(newVariant)
+                    )
+                    updatedGlyphs.add(newGlyph)
+                }
+            }
+
+            glyphRepository.saveGlyphs(profileId, updatedGlyphs)
+
+            // Clear scanned candidates after commit
+            _uiState.update { it.copy(isSaving = false, scannedCandidates = emptyList()) }
+        }
+    }
+
+    fun updateActiveProfile(profile: HandwritingProfile?) {
+        _uiState.update { it.copy(activeProfile = profile) }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\capture\DrawingPad.kt ===
+package com.app.inktwin.ui.screen.capture
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.app.inktwin.core.glyph.PathCommand
+import com.app.inktwin.core.glyph.Glyph
+
+@Composable
+fun DrawingPad(
+    currentChar: Char?,
+    progressCount: Int,
+    totalLetters: Int,
+    capturedGlyphs: List<Glyph>,
+    onStrokeComplete: (List<PathCommand>) -> Unit,
+    onUndo: () -> Unit,
+    onClear: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSaveAndNext: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val allStrokes = remember { mutableStateListOf<List<Offset>>() }
+    val currentStroke = remember { mutableStateOf(listOf<Offset>()) }
+
+    // Automatically clear the canvas whenever the active character changes
+    LaunchedEffect(currentChar) {
+        allStrokes.clear()
+        currentStroke.value = emptyList()
+    }
+
+    val padSize = 300.dp
+    val guideColor = Color.LightGray
+    val baselineColor = Color(0xFFFF4444)
+
+    fun strokesToPathCommands(strokes: List<List<Offset>>): List<PathCommand> {
+        val commands = mutableListOf<PathCommand>()
+        for (stroke in strokes) {
+            if (stroke.isEmpty()) continue
+            commands.add(PathCommand(type = "moveTo", points = listOf(stroke[0].x, stroke[0].y)))
+            for (i in 1 until stroke.size) {
+                commands.add(PathCommand(type = "lineTo", points = listOf(stroke[i].x, stroke[i].y)))
+            }
+        }
+        return commands
+    }
+
+    fun addCurrentStrokeToPath() {
+        val stroke = currentStroke.value
+        if (stroke.isEmpty()) return
+
+        val savedStroke = stroke.toList()
+        allStrokes.add(savedStroke)
+
+        // Send only the newly completed stroke so ViewModel does not duplicate earlier strokes
+        val pathCommands = strokesToPathCommands(listOf(savedStroke))
+        onStrokeComplete(pathCommands)
+
+        currentStroke.value = emptyList()
+    }
+
+    Column(
+        modifier = modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Captured: $progressCount / $totalLetters",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(16.dp)
+        )
+
+        currentChar?.let { char ->
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.padding(bottom = 8.dp)
+            ) {
+                Text(
+                    text = "Draw: '$char'",
+                    style = MaterialTheme.typography.headlineMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+
+        Card(
+            modifier = Modifier
+                .size(padSize)
+                .padding(16.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.White)
+                    .pointerInput(currentChar) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                currentStroke.value = listOf(offset)
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                val last = currentStroke.value.lastOrNull() ?: change.position
+                                currentStroke.value = currentStroke.value + Offset(
+                                    last.x + dragAmount.x,
+                                    last.y + dragAmount.y
+                                )
+                            },
+                            onDragEnd = {
+                                addCurrentStrokeToPath()
+                            },
+                            onDragCancel = {
+                                currentStroke.value = emptyList()
+                            }
+                        )
+                    }
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val width = size.width
+                    val height = size.height
+                    val padding = 20.dp.toPx()
+
+                    val ascenderY = height * 0.20f
+                    val xHeightY = height * 0.45f
+                    val baselineY = height * 0.75f
+                    val descenderY = height * 0.92f
+
+                    drawLine(
+                        color = guideColor,
+                        start = Offset(padding, ascenderY),
+                        end = Offset(width - padding, ascenderY),
+                        strokeWidth = 2f
+                    )
+                    drawLine(
+                        color = guideColor,
+                        start = Offset(padding, xHeightY),
+                        end = Offset(width - padding, xHeightY),
+                        strokeWidth = 2f
+                    )
+                    drawLine(
+                        color = baselineColor,
+                        start = Offset(padding, baselineY),
+                        end = Offset(width - padding, baselineY),
+                        strokeWidth = 4f
+                    )
+                    drawLine(
+                        color = guideColor,
+                        start = Offset(padding, descenderY),
+                        end = Offset(width - padding, descenderY),
+                        strokeWidth = 2f
+                    )
+
+                    allStrokes.forEach { stroke ->
+                        if (stroke.size > 1) {
+                            val path = Path().apply {
+                                moveTo(stroke[0].x, stroke[0].y)
+                                for (i in 1 until stroke.size) {
+                                    lineTo(stroke[i].x, stroke[i].y)
+                                }
+                            }
+                            drawPath(
+                                path = path,
+                                color = Color.Black,
+                                style = Stroke(width = 8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            )
+                        }
+                    }
+
+                    val current = currentStroke.value
+                    if (current.size > 1) {
+                        val path = Path().apply {
+                            moveTo(current[0].x, current[0].y)
+                            for (i in 1 until current.size) {
+                                lineTo(current[i].x, current[i].y)
+                            }
+                        }
+                        drawPath(
+                            path = path,
+                            color = Color.Blue,
+                            style = Stroke(width = 8f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        )
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    allStrokes.clear()
+                    currentStroke.value = emptyList()
+                    onPrevious()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("<- Prev")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    if (allStrokes.isNotEmpty()) {
+                        allStrokes.removeAt(allStrokes.lastIndex)
+                    }
+                    onUndo()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Undo")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    allStrokes.clear()
+                    currentStroke.value = emptyList()
+                    onClear()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Clear")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    allStrokes.clear()
+                    currentStroke.value = emptyList()
+                    onNext()
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Next ->")
+            }
+        }
+
+        Button(
+            onClick = {
+                if (currentStroke.value.isNotEmpty()) {
+                    addCurrentStrokeToPath()
+                }
+                onSaveAndNext()
+                allStrokes.clear()
+                currentStroke.value = emptyList()
+            },
+            modifier = Modifier
+                .padding(horizontal = 16.dp)
+                .fillMaxWidth()
+        ) {
+            Text("Save & Next ->")
+        }
+    }
+}
+
+@Composable
+fun CharacterGrid(
+    characters: List<Char>,
+    capturedGlyphs: List<Glyph>,
+    onCharSelected: (Char) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(52.dp),
+        modifier = modifier,
+        contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(characters) { char ->
+            val isCaptured = capturedGlyphs.any { it.character == char.toString() }
+            CharacterCell(
+                char = char,
+                isCaptured = isCaptured,
+                onClick = { onCharSelected(char) }
+            )
+        }
+    }
+}
+
+@Composable
+fun CharacterCell(
+    char: Char,
+    isCaptured: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .aspectRatio(1f)
+            .padding(2.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isCaptured) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        ),
+        onClick = onClick
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = char.toString(),
+                fontSize = 20.sp,
+                color = if (isCaptured) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun CategoryTabs(
+    selectedCategory: CharacterCategory,
+    onCategorySelected: (CharacterCategory) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CharacterCategory.ALL.forEach { category ->
+            Button(
+                onClick = { onCategorySelected(category) },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedCategory == category) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(category.displayName)
+            }
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\editor\EditorScreen.kt ===
+package com.app.inktwin.ui.screen.editor
+
+import android.graphics.Color
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+
+@Composable
+fun EditorScreen(
+    onNavigateToPreview: () -> Unit
+) {
+    val viewModel: EditorViewModel = hiltViewModel()
+    val textFieldValue by viewModel.textFieldValue.collectAsState()
+    val colorSpans by viewModel.colorSpans.collectAsState()
+    val activeColorHex by viewModel.activeColorHex.collectAsState()
+    val canUndo by viewModel.canUndo.collectAsState()
+    val canRedo by viewModel.canRedo.collectAsState()
+
+    var showCustomColorDialog by remember { mutableStateOf(false) }
+
+    val visualTransformation = remember(colorSpans) {
+        VisualTransformation { annotatedString ->
+            val builder = AnnotatedString.Builder(annotatedString.text)
+            val len = annotatedString.text.length
+            for (span in colorSpans) {
+                val s = span.start.coerceIn(0, len)
+                val e = span.end.coerceIn(0, len)
+                if (s < e) {
+                    try {
+                        val c = ComposeColor(Color.parseColor(span.colorHex))
+                        builder.addStyle(SpanStyle(color = c), s, e)
+                    } catch (_: Exception) {}
+                }
+            }
+            TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(8.dp),
+        verticalArrangement = Arrangement.Top
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Edit Note", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { viewModel.undo() }, enabled = canUndo) { Text("Undo") }
+                Button(onClick = { viewModel.redo() }, enabled = canRedo) { Text("Redo") }
+            }
+            Button(onClick = onNavigateToPreview) { Text("Preview â†’") }
+        }
+
+        Text(
+            text = "${viewModel.characterCount} chars | ${viewModel.wordCount} words",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(vertical = 4.dp)
+        )
+
+        ColorPaletteBar(
+            activeHex = activeColorHex,
+            onSelect = { viewModel.setActiveColorHex(it) },
+            onCustomClick = { showCustomColorDialog = true }
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            Button(onClick = { viewModel.applyColorToSelection() }) { Text("Sel") }
+            Button(onClick = { viewModel.applyColorToCurrentWord() }) { Text("Word") }
+            Button(onClick = { viewModel.applyColorToCurrentLine() }) { Text("Line") }
+            Button(onClick = { viewModel.applyColorToCurrentParagraph() }) { Text("Para") }
+            Button(onClick = { viewModel.clearSelectionColor() }) { Text("Clear") }
+        }
+
+        OutlinedTextField(
+            value = textFieldValue,
+            onValueChange = { viewModel.onTextFieldValueChange(it) },
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            visualTransformation = visualTransformation,
+            placeholder = { Text("Start typing...") },
+            keyboardActions = KeyboardActions.Default
+        )
+    }
+
+    if (showCustomColorDialog) {
+        CustomColorDialog(
+            onDismiss = { showCustomColorDialog = false },
+            onColorConfirmed = { hex ->
+                viewModel.setActiveColorHex(hex)
+                showCustomColorDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun ColorPaletteBar(
+    activeHex: String,
+    onSelect: (String) -> Unit,
+    onCustomClick: () -> Unit
+) {
+    val colors = listOf("#1E3A8A", "#0F172A", "#DC2626", "#15803D", "#6D28D9")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        colors.forEach { hex ->
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(ComposeColor(Color.parseColor(hex)))
+                    .border(
+                        width = if (activeHex == hex) 3.dp else 1.dp,
+                        color = if (activeHex == hex) ComposeColor.Black else ComposeColor.LightGray,
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                    .clickable { onSelect(hex) }
+            )
+        }
+
+        OutlinedButton(
+            onClick = onCustomClick,
+            modifier = Modifier.height(36.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp)
+        ) {
+            Text("+ Custom", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+fun CustomColorDialog(
+    onDismiss: () -> Unit,
+    onColorConfirmed: (String) -> Unit
+) {
+    var red by remember { mutableFloatStateOf(30f) }
+    var green by remember { mutableFloatStateOf(58f) }
+    var blue by remember { mutableFloatStateOf(138f) }
+
+    val currentHex = String.format("#%02X%02X%02X", red.toInt(), green.toInt(), blue.toInt())
+    val previewColor = ComposeColor(red.toInt(), green.toInt(), blue.toInt())
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Custom RGB Ink Color") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(60.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(previewColor)
+                        .border(1.dp, ComposeColor.Gray, RoundedCornerShape(8.dp))
+                )
+
+                Text(currentHex, style = MaterialTheme.typography.bodyMedium)
+
+                Text("Red: ${red.toInt()}")
+                Slider(
+                    value = red,
+                    onValueChange = { red = it },
+                    valueRange = 0f..255f
+                )
+
+                Text("Green: ${green.toInt()}")
+                Slider(
+                    value = green,
+                    onValueChange = { green = it },
+                    valueRange = 0f..255f
+                )
+
+                Text("Blue: ${blue.toInt()}")
+                Slider(
+                    value = blue,
+                    onValueChange = { blue = it },
+                    valueRange = 0f..255f
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onColorConfirmed(currentHex) }) {
+                Text("Apply Color")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\editor\EditorViewModel.kt ===
+package com.app.inktwin.ui.screen.editor
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.text.input.TextFieldValue
+import com.app.inktwin.core.note.ColorSpan
+import com.app.inktwin.core.note.NoteDraft
+import com.app.inktwin.core.profile.HandwritingProfile
+import com.app.inktwin.data.repository.NoteDraftRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+@HiltViewModel
+class EditorViewModel @Inject constructor(
+    private val noteDraftRepository: NoteDraftRepository,
+    profileRepository: com.app.inktwin.data.repository.HandwritingProfileRepository
+) : ViewModel() {
+
+    private val _textFieldValue = MutableStateFlow(TextFieldValue(""))
+    val textFieldValue: StateFlow<TextFieldValue> = _textFieldValue.asStateFlow()
+
+    private val _colorSpans = MutableStateFlow<List<ColorSpan>>(emptyList())
+    val colorSpans: StateFlow<List<ColorSpan>> = _colorSpans.asStateFlow()
+
+    private val _activeColorHex = MutableStateFlow("#1E3A8A")
+    val activeColorHex: StateFlow<String> = _activeColorHex.asStateFlow()
+
+    private val _undoStack = MutableStateFlow<List<Pair<String, List<ColorSpan>>>>(emptyList())
+    private val _redoStack = MutableStateFlow<List<Pair<String, List<ColorSpan>>>>(emptyList())
+
+    private val profileIdFlow = profileRepository.observeActiveProfile()
+        .map { it?.id }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val canUndo: StateFlow<Boolean> = _undoStack.map { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val canRedo: StateFlow<Boolean> = _redoStack.map { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val characterCount: Int
+        get() = _textFieldValue.value.text.count { !it.isWhitespace() }
+
+    val wordCount: Int
+        get() = _textFieldValue.value.text.trim().takeIf { it.isNotEmpty() }
+            ?.split(Regex("\\s+"))?.size ?: 0
+
+    init {
+        loadDraft()
+        setupAutoSave()
+    }
+
+    private fun loadDraft() {
+        viewModelScope.launch {
+            val profileId = profileIdFlow.value
+            val drafts = noteDraftRepository.observeDrafts(profileId).firstOrNull()
+            val draft = drafts?.firstOrNull()
+
+            if (draft != null && draft.plainText.isNotEmpty()) {
+                _textFieldValue.value = TextFieldValue(draft.plainText)
+                _colorSpans.value = draft.colorSpans
+                _activeColorHex.value = draft.colorSpans.firstOrNull()?.colorHex ?: "#1E3A8A"
+            }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun setupAutoSave() {
+        viewModelScope.launch {
+            _textFieldValue
+                .debounce(800)
+                .distinctUntilChanged()
+                .collect { saveCurrentDraft() }
+        }
+    }
+
+    fun setActiveColorHex(hex: String) {
+        _activeColorHex.value = hex
+    }
+
+    private fun pushUndo() {
+        val snapshot = _textFieldValue.value.text to _colorSpans.value
+        _undoStack.update { it + snapshot }
+        _redoStack.value = emptyList()
+    }
+
+    fun undo() {
+        val undoList = _undoStack.value
+        if (undoList.isEmpty()) return
+
+        val current = _textFieldValue.value.text to _colorSpans.value
+        val last = undoList.last()
+
+        _textFieldValue.value = TextFieldValue(last.first)
+        _colorSpans.value = last.second
+
+        _undoStack.value = undoList.dropLast(1)
+        _redoStack.update { it + current }
+    }
+
+    fun redo() {
+        val redoList = _redoStack.value
+        if (redoList.isEmpty()) return
+
+        val current = _textFieldValue.value.text to _colorSpans.value
+        val next = redoList.last()
+
+        _textFieldValue.value = TextFieldValue(next.first)
+        _colorSpans.value = next.second
+
+        _redoStack.value = redoList.dropLast(1)
+        _undoStack.update { it + current }
+    }
+
+    fun onTextFieldValueChange(newValue: TextFieldValue) {
+        _textFieldValue.value = newValue
+    }
+
+    fun applyColorToSelection() {
+        pushUndo()
+        val sel = _textFieldValue.value.selection
+        if (sel.length > 0) {
+            val text = _textFieldValue.value.text
+            val newSpan = ColorSpan(
+                start = sel.min.coerceIn(0, text.length),
+                end = sel.max.coerceIn(0, text.length),
+                colorHex = _activeColorHex.value,
+                granularity = "selection"
+            )
+            _colorSpans.value = applySpanToList(newSpan, _colorSpans.value)
+        } else {
+            applyColorToCurrentWord()
+        }
+    }
+
+    fun applyColorToCurrentWord() {
+        pushUndo()
+        val text = _textFieldValue.value.text
+        val cursor = _textFieldValue.value.selection.start
+
+        var start = cursor
+        while (start > 0 && !text[start - 1].isWhitespace()) start--
+        var end = cursor
+        while (end < text.length && !text[end].isWhitespace()) end++
+
+        if (start < end) {
+            val newSpan = ColorSpan(start, end, _activeColorHex.value, "word")
+            _colorSpans.value = applySpanToList(newSpan, _colorSpans.value)
+        }
+    }
+
+    fun applyColorToCurrentLine() {
+        pushUndo()
+        val text = _textFieldValue.value.text
+        val cursor = _textFieldValue.value.selection.start
+
+        var start = cursor
+        while (start > 0 && text[start - 1] != '\n') start--
+        var end = cursor
+        while (end < text.length && text[end] != '\n') end++
+
+        if (start < end) {
+            val newSpan = ColorSpan(start, end, _activeColorHex.value, "line")
+            _colorSpans.value = applySpanToList(newSpan, _colorSpans.value)
+        }
+    }
+
+    fun applyColorToCurrentParagraph() {
+        pushUndo()
+        val text = _textFieldValue.value.text
+        val cursor = _textFieldValue.value.selection.start
+
+        var start = cursor
+        while (start > 0) {
+            if (start >= 2 && text[start-1] == '\n' && text[start-2] == '\n') break
+            start--
+        }
+        var end = cursor
+        while (end < text.length) {
+            if (end <= text.length - 2 && text[end] == '\n' && text[end+1] == '\n') break
+            end++
+        }
+
+        if (start < end) {
+            val newSpan = ColorSpan(start, end, _activeColorHex.value, "paragraph")
+            _colorSpans.value = applySpanToList(newSpan, _colorSpans.value)
+        }
+    }
+
+    fun clearSelectionColor() {
+        pushUndo()
+        val sel = _textFieldValue.value.selection
+        if (sel.length > 0) {
+            _colorSpans.value = _colorSpans.value.filterNot { it.start < sel.max && it.end > sel.min }
+        }
+    }
+
+    private fun applySpanToList(newSpan: ColorSpan, existing: List<ColorSpan>): List<ColorSpan> {
+        val nonOverlapping = existing.filter { !(it.start < newSpan.end && it.end > newSpan.start) }
+        return (nonOverlapping + newSpan).sortedBy { it.start }
+    }
+
+    private suspend fun saveCurrentDraft() {
+        val text = _textFieldValue.value.text
+        val draft = NoteDraft(
+            title = text.lines().firstOrNull()?.take(30) ?: "Untitled",
+            plainText = text,
+            colorSpans = _colorSpans.value,
+            profileId = profileIdFlow.value
+        )
+        noteDraftRepository.createDraft(draft)
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\preview\PreviewScreen.kt ===
+package com.app.inktwin.ui.screen.preview
+
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.hilt.navigation.compose.hiltViewModel
+import coil.compose.AsyncImage
+import com.app.inktwin.core.note.PageSettings
+
+@Composable
+fun PreviewScreen() {
+    val viewModel: PreviewViewModel = hiltViewModel()
+    val uiState by viewModel.uiState.collectAsState()
+
+    var showExportDialog by remember { mutableStateOf(false) }
+    var exportFormat by remember { mutableStateOf(ExportFormat.PNG) }
+    var exportScope by remember { mutableStateOf(ExportScope.CURRENT_PAGE) }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(8.dp),
+        verticalArrangement = Arrangement.Top
+    ) {
+        Text(
+            text = "Preview & Export",
+            style = MaterialTheme.typography.titleLarge
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            shadowElevation = 4.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Page Settings", style = MaterialTheme.typography.titleMedium)
+
+                var showRedMargins by remember { mutableStateOf(uiState.pageSettings.showRedMargins) }
+                var showPageNumbers by remember { mutableStateOf(uiState.pageSettings.showPageNumbers) }
+                var showRuledLines by remember { mutableStateOf(uiState.showRuledLines) }
+                var fontSize by remember { mutableFloatStateOf(uiState.fontSize) }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Red Margins")
+                    Switch(
+                        checked = showRedMargins,
+                        onCheckedChange = {
+                            showRedMargins = it
+                            viewModel.setPageSettings(
+                                uiState.pageSettings.copy(showRedMargins = it)
+                            )
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Page Numbers")
+                    Switch(
+                        checked = showPageNumbers,
+                        onCheckedChange = {
+                            showPageNumbers = it
+                            viewModel.setPageSettings(
+                                uiState.pageSettings.copy(showPageNumbers = it)
+                            )
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Ruled Lines")
+                    Switch(
+                        checked = showRuledLines,
+                        onCheckedChange = { viewModel.setRuledLines(it) }
+                    )
+                }
+
+                Text("Text Size: ${fontSize.toInt()}")
+                Slider(
+                    value = fontSize,
+                    onValueChange = {
+                        fontSize = it
+                        viewModel.setFontSize(it)
+                    },
+                    valueRange = 24f..48f
+                )
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        if (uiState.pageBitmaps.isNotEmpty()) {
+            MultiPagePreviewViewer(
+                currentPageIndex = uiState.currentPageIndex,
+                totalPages = uiState.pages.size,
+                currentBitmap = uiState.pageBitmaps.getOrNull(uiState.currentPageIndex),
+                onPrevious = { viewModel.navigateToPage(uiState.currentPageIndex - 1) },
+                onNext = { viewModel.navigateToPage(uiState.currentPageIndex + 1) }
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("No content to preview")
+            }
+        }
+
+        uiState.exportStatus?.let { status ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Row(
+                    modifier = Modifier.padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(status, style = MaterialTheme.typography.bodyMedium)
+                    TextButton(onClick = { viewModel.clearExportStatus() }) {
+                        Text("Dismiss")
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = { showExportDialog = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Save / Export")
+        }
+    }
+
+    val context = LocalContext.current
+    if (showExportDialog) {
+        ExportDialog(
+            format = exportFormat,
+            scope = exportScope,
+            totalPages = uiState.pages.size,
+            onFormatChange = { exportFormat = it },
+            onScopeChange = { exportScope = it },
+            onDismiss = { showExportDialog = false },
+            onConfirm = {
+                viewModel.exportDocument(context, exportFormat, exportScope)
+                showExportDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun MultiPagePreviewViewer(
+    currentPageIndex: Int,
+    totalPages: Int,
+    currentBitmap: Bitmap?,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = onPrevious,
+                enabled = currentPageIndex > 0
+            ) {
+                Text("â† Prev")
+            }
+
+            Text(
+                text = "Page ${currentPageIndex + 1} of $totalPages",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            OutlinedButton(
+                onClick = onNext,
+                enabled = currentPageIndex < totalPages - 1
+            ) {
+                Text("Next â†’")
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        currentBitmap?.let { bitmap ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.8f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Page preview",
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ExportDialog(
+    format: ExportFormat,
+    scope: ExportScope,
+    totalPages: Int,
+    onFormatChange: (ExportFormat) -> Unit,
+    onScopeChange: (ExportScope) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Export Document") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Column {
+                    Text("Format", style = MaterialTheme.typography.titleSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = format == ExportFormat.PNG,
+                                onClick = { onFormatChange(ExportFormat.PNG) }
+                            )
+                            Text("PNG Image")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = format == ExportFormat.PDF,
+                                onClick = { onFormatChange(ExportFormat.PDF) }
+                            )
+                            Text("PDF Document")
+                        }
+                    }
+                }
+
+                Column {
+                    Text("Scope", style = MaterialTheme.typography.titleSmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = scope == ExportScope.CURRENT_PAGE,
+                                onClick = { onScopeChange(ExportScope.CURRENT_PAGE) }
+                            )
+                            Text("This Page Only")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = scope == ExportScope.ENTIRE_DOCUMENT,
+                                onClick = { onScopeChange(ExportScope.ENTIRE_DOCUMENT) }
+                            )
+                            Text("All $totalPages Pages")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("Export")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\screen\preview\PreviewViewModel.kt ===
+package com.app.inktwin.ui.screen.preview
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfDocument
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.app.inktwin.core.glyph.Glyph
+import com.app.inktwin.core.note.NoteDraft
+import com.app.inktwin.core.note.PageSettings
+import com.app.inktwin.core.render.HandwritingPageRenderer
+import com.app.inktwin.core.render.PageLayout
+import com.app.inktwin.data.repository.GlyphRepository
+import com.app.inktwin.data.repository.HandwritingProfileRepository
+import com.app.inktwin.data.repository.NoteDraftRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
+import javax.inject.Inject
+
+enum class ExportFormat { PNG, PDF }
+enum class ExportScope { CURRENT_PAGE, ENTIRE_DOCUMENT }
+
+data class PreviewUiState(
+    val draft: NoteDraft? = null,
+    val glyphs: Map<String, Glyph> = emptyMap(),
+    val pages: List<PageLayout> = emptyList(),
+    val pageBitmaps: List<Bitmap> = emptyList(),
+    val currentPageIndex: Int = 0,
+    val pageSettings: PageSettings = PageSettings(),
+    val fontSize: Float = 36f,
+    val showRuledLines: Boolean = true,
+    val isExporting: Boolean = false,
+    val exportStatus: String? = null
+)
+
+@HiltViewModel
+class PreviewViewModel @Inject constructor(
+    private val noteDraftRepository: NoteDraftRepository,
+    private val glyphRepository: GlyphRepository,
+    private val handwritingProfileRepository: HandwritingProfileRepository
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(PreviewUiState())
+    val uiState: StateFlow<PreviewUiState> = _uiState.asStateFlow()
+
+    val currentPageIndex: StateFlow<Int> = _uiState.map { state -> state.currentPageIndex }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val pageBitmaps: StateFlow<List<Bitmap>> = _uiState.map { state -> state.pageBitmaps }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val totalPages: Int
+        get() = _uiState.value.pages.size
+
+    init {
+        observeProfileAndGlyphs()
+        loadDraft()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeProfileAndGlyphs() {
+        viewModelScope.launch {
+            handwritingProfileRepository.observeActiveProfile()
+                .flatMapLatest { profile ->
+                    if (profile != null) {
+                        glyphRepository.observeGlyphs(profile.id)
+                    } else kotlinx.coroutines.flow.flowOf(emptyList())
+                }
+                .collect { glyphs ->
+                    val glyphMap = glyphs
+                        .filter { it.variants.isNotEmpty() && !it.isFallback }
+                        .associateBy { it.character }
+                    _uiState.update { it.copy(glyphs = glyphMap) }
+                    _uiState.value.draft?.let { draft ->
+                        renderPages(draft, glyphMap)
+                    }
+                }
+        }
+    }
+
+    private fun loadDraft() {
+        viewModelScope.launch {
+            noteDraftRepository.observeDrafts(null)
+                .firstOrNull()
+                ?.firstOrNull()
+                ?.let { draft ->
+                    _uiState.update { it.copy(draft = draft) }
+                    val glyphs = _uiState.value.glyphs
+                    if (glyphs.isNotEmpty()) {
+                        renderPages(draft, glyphs)
+                    }
+                }
+        }
+    }
+
+    fun setPageSettings(settings: PageSettings) {
+        _uiState.update { it.copy(pageSettings = settings) }
+        val draft = _uiState.value.draft
+        if (draft != null) {
+            viewModelScope.launch {
+                renderPages(draft, _uiState.value.glyphs)
+            }
+        }
+    }
+
+    fun setFontSize(size: Float) {
+        _uiState.update { it.copy(fontSize = size) }
+        val draft = _uiState.value.draft
+        if (draft != null) {
+            viewModelScope.launch {
+                renderPages(draft, _uiState.value.glyphs)
+            }
+        }
+    }
+
+    fun setRuledLines(enabled: Boolean) {
+        _uiState.update { it.copy(showRuledLines = enabled) }
+        val draft = _uiState.value.draft
+        if (draft != null) {
+            viewModelScope.launch {
+                renderPages(draft, _uiState.value.glyphs)
+            }
+        }
+    }
+
+    fun navigateToPage(index: Int) {
+        val maxIndex = _uiState.value.pages.size - 1
+        _uiState.update {
+            it.copy(currentPageIndex = index.coerceIn(0, maxIndex))
+        }
+    }
+
+    private suspend fun renderPages(draft: NoteDraft, glyphs: Map<String, Glyph>) {
+        val pages = HandwritingPageRenderer.paginateText(
+            draft = draft,
+            pageSettings = _uiState.value.pageSettings,
+            fontSize = _uiState.value.fontSize,
+            glyphsByChar = glyphs
+        )
+
+        _uiState.update { it.copy(pages = pages) }
+
+        val bitmaps = pages.map { page ->
+            HandwritingPageRenderer.renderPageToBitmap(
+                page = page,
+                draft = draft,
+                glyphsByChar = glyphs,
+                pageSettings = _uiState.value.pageSettings,
+                fontSize = _uiState.value.fontSize,
+                showRedMargins = _uiState.value.pageSettings.showRedMargins,
+                showPageNumbers = _uiState.value.pageSettings.showPageNumbers,
+                showRuledLines = _uiState.value.showRuledLines
+            )
+        }
+
+        _uiState.update { it.copy(pageBitmaps = bitmaps) }
+    }
+
+    fun exportDocument(context: Context, format: ExportFormat, scope: ExportScope) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isExporting = true, exportStatus = null) }
+
+            try {
+                val state = _uiState.value
+                val draft = state.draft ?: return@launch
+
+                val pagesToExport = when (scope) {
+                    ExportScope.CURRENT_PAGE -> listOf(state.pages[state.currentPageIndex])
+                    ExportScope.ENTIRE_DOCUMENT -> state.pages
+                }
+
+                val bitmapsToExport = when (scope) {
+                    ExportScope.CURRENT_PAGE -> listOf(state.pageBitmaps[state.currentPageIndex])
+                    ExportScope.ENTIRE_DOCUMENT -> state.pageBitmaps
+                }
+
+                when (format) {
+                    ExportFormat.PNG -> exportAsPng(context, bitmapsToExport, draft.title)
+                    ExportFormat.PDF -> exportAsPdf(context, pagesToExport, draft, state)
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        exportStatus = "Export successful! Check your Downloads folder."
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isExporting = false,
+                        exportStatus = "Export failed: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun exportAsPng(context: Context, bitmaps: List<Bitmap>, title: String) {
+        val downloadsDir = context.getExternalFilesDir(null)
+        val inktwinDir = File(downloadsDir, "InkTwin").apply { mkdirs() }
+
+        bitmaps.forEachIndexed { index, bitmap ->
+            val filename = if (bitmaps.size == 1) {
+                "${title.replace(Regex("[^a-zA-Z0-9]"), "_")}.png"
+            } else {
+                "${title.replace(Regex("[^a-zA-Z0-9]"), "_")}_page${index + 1}.png"
+            }
+            val file = File(inktwinDir, filename)
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+        }
+    }
+
+    private fun exportAsPdf(context: Context, pages: List<PageLayout>, draft: NoteDraft, state: PreviewUiState) {
+        val document = PdfDocument()
+        val (pageWidth, pageHeight) = HandwritingPageRenderer.getPageSize(state.pageSettings.pageSize)
+
+        for ((index, page) in pages.withIndex()) {
+            val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, index + 1).create()
+            val pdfPage = document.startPage(pageInfo)
+
+            val bitmap = HandwritingPageRenderer.renderPageToBitmap(
+                page = page,
+                draft = draft,
+                glyphsByChar = state.glyphs,
+                pageSettings = state.pageSettings,
+                fontSize = state.fontSize,
+                showRedMargins = state.pageSettings.showRedMargins,
+                showPageNumbers = state.pageSettings.showPageNumbers,
+                showRuledLines = state.showRuledLines
+            )
+
+            pdfPage.canvas.drawBitmap(bitmap, 0f, 0f, null)
+            document.finishPage(pdfPage)
+            bitmap.recycle()
+        }
+
+        val downloadsDir = context.getExternalFilesDir(null)
+        val inktwinDir = File(downloadsDir, "InkTwin").apply { mkdirs() }
+        val filename = "${draft.title.replace(Regex("[^a-zA-Z0-9]"), "_")}.pdf"
+        val file = File(inktwinDir, filename)
+
+        FileOutputStream(file).use { out ->
+            document.writeTo(out)
+        }
+        document.close()
+    }
+
+    fun clearExportStatus() {
+        _uiState.update { it.copy(exportStatus = null) }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\theme\Shape.kt ===
+package com.app.inktwin.ui.theme
+
+import androidx.compose.material3.Shapes
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
+
+val Shapes = Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(24.dp)
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\theme\Theme.kt ===
+package com.app.inktwin.ui.theme
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
+
+private val DarkColorScheme = darkColorScheme(
+    primary = Color(0xFF8AB4F8),
+    primaryContainer = Color(0xFF1A2C4A),
+    secondary = Color(0xFFB4C7E0),
+    secondaryContainer = Color(0xFF2B3D5E),
+    tertiary = Color(0xFFCEC2F8),
+    tertiaryContainer = Color(0xFF3B3262),
+    surface = Color(0xFF121212),
+    surfaceVariant = Color(0xFF1E1E1E),
+    background = Color(0xFF0A0A0A),
+    onPrimary = Color(0xFF001D3D),
+    onPrimaryContainer = Color(0xFFD0E3FF),
+    onSecondary = Color(0xFF14263A),
+    onSecondaryContainer = Color(0xFFD9E8FF),
+    onTertiary = Color(0xFF221A4C),
+    onTertiaryContainer = Color(0xFFE8DDFF),
+    onSurface = Color(0xFFE6E1E5),
+    onSurfaceVariant = Color(0xFFC4C7CC),
+    outline = Color(0xFF8E9095),
+    outlineVariant = Color(0xFF44474B),
+    scrim = Color(0xFF000000),
+    inverseSurface = Color(0xFFE6E1E5),
+    inverseOnSurface = Color(0xFF313033),
+    inversePrimary = Color(0xFF2B5A8E),
+    surfaceTint = Color(0xFF8AB4F8)
+)
+
+private val LightColorScheme = lightColorScheme(
+    primary = Color(0xFF2B5A8E),
+    primaryContainer = Color(0xFFD0E3FF),
+    secondary = Color(0xFF4C627A),
+    secondaryContainer = Color(0xFFD9E8FF),
+    tertiary = Color(0xFF5B4F8A),
+    tertiaryContainer = Color(0xFFE8DDFF),
+    surface = Color(0xFFFAFAFA),
+    surfaceVariant = Color(0xFFE0E3E8),
+    background = Color(0xFFFFFFFF),
+    onPrimary = Color(0xFFFFFFFF),
+    onPrimaryContainer = Color(0xFF001D3D),
+    onSecondary = Color(0xFFFFFFFF),
+    onSecondaryContainer = Color(0xFF14263A),
+    onTertiary = Color(0xFFFFFFFF),
+    onTertiaryContainer = Color(0xFF221A4C),
+    onSurface = Color(0xFF1C1B1F),
+    onSurfaceVariant = Color(0xFF44474B),
+    outline = Color(0xFF74777B),
+    outlineVariant = Color(0xFFC4C7CC),
+    scrim = Color(0xFF000000),
+    inverseSurface = Color(0xFF313033),
+    inverseOnSurface = Color(0xFFF4EFF4),
+    inversePrimary = Color(0xFF8AB4F8),
+    surfaceTint = Color(0xFF2B5A8E)
+)
+
+@Composable
+fun InkTwinTheme(
+    darkTheme: Boolean = false, // We'll read from system later
+    content: @Composable () -> Unit
+) {
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\ui\theme\Typography.kt ===
+package com.app.inktwin.ui.theme
+
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+
+val Typography = Typography(
+    displayLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 57.sp,
+        lineHeight = 64.sp,
+        letterSpacing = -0.25.sp
+    ),
+    displayMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 45.sp,
+        lineHeight = 52.sp,
+        letterSpacing = 0.sp
+    ),
+    displaySmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 36.sp,
+        lineHeight = 44.sp,
+        letterSpacing = 0.sp
+    ),
+    headlineLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 32.sp,
+        lineHeight = 40.sp,
+        letterSpacing = 0.sp
+    ),
+    headlineMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
+        lineHeight = 36.sp,
+        letterSpacing = 0.sp
+    ),
+    headlineSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 24.sp,
+        lineHeight = 32.sp,
+        letterSpacing = 0.sp
+    ),
+    titleLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Bold,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = 0.sp
+    ),
+    titleMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.15.sp
+    ),
+    titleSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.1.sp
+    ),
+    bodyLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.5.sp
+    ),
+    bodyMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.25.sp
+    ),
+    bodySmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.4.sp
+    ),
+    labelLarge = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.1.sp
+    ),
+    labelMedium = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.5.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.Default,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.5.sp
+    )
+)
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\InkTwinApplication.kt ===
+package com.app.inktwin
+
+import android.app.Application
+import dagger.hilt.android.HiltAndroidApp
+
+@HiltAndroidApp
+class InkTwinApplication : Application()
+=== FILE: E:\placeholder\app\src\main\java\com\app\inktwin\MainActivity.kt ===
+package com.app.inktwin
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.app.inktwin.ui.navigation.CAPTURE_ROUTE
+import com.app.inktwin.ui.navigation.EDITOR_ROUTE
+import com.app.inktwin.ui.navigation.PREVIEW_ROUTE
+import com.app.inktwin.ui.screen.capture.CaptureScreen
+import com.app.inktwin.ui.screen.editor.EditorScreen
+import com.app.inktwin.ui.screen.preview.PreviewScreen
+import com.app.inktwin.ui.theme.InkTwinTheme
+import com.app.inktwin.ui.theme.Shapes
+import dagger.hilt.android.AndroidEntryPoint
+
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            InkTwinTheme {
+                var showAboutDialog by remember { mutableStateOf(false) }
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        val navController = rememberNavController()
+                        NavHost(navController, startDestination = CAPTURE_ROUTE) {
+                            composable(CAPTURE_ROUTE) {
+                                CaptureScreen(onNavigateToEditor = {
+                                    navController.navigate(EDITOR_ROUTE)
+                                })
+                            }
+                            composable(EDITOR_ROUTE) {
+                                EditorScreen(onNavigateToPreview = {
+                                    navController.navigate(PREVIEW_ROUTE)
+                                })
+                            }
+                            composable(PREVIEW_ROUTE) {
+                                PreviewScreen()
+                            }
+                        }
+                    }
+
+                    // Subtle creator badge in bottom-right corner
+                    Text(
+                        text = "Made by Rudra",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp)
+                            .clickable { showAboutDialog = true }
+                    )
+                }
+
+                if (showAboutDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showAboutDialog = false },
+                        title = { Text("InkTwin") },
+                        text = {
+                            Text(
+                                "InkTwin v1.0\n\nDesigned & Developed by\nRudra Bhardwaj",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showAboutDialog = false }) {
+                                Text("OK")
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+=== FILE: E:\placeholder\app\src\main\res\drawable\ic_launcher_foreground.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF2B5A8E"
+        android:pathData="M54,14C31.9,14 14,31.9 14,54s17.9,40 40,40 40-17.9 40-40S76.1,14 54,14zM54,90c-19.9,0-36-16.1-36-36S34.1,18 54,18s36,16.1 36,36-16.1,36-36,36zM54,26c15.4,0 28,12.6 28,28S69.4,82 54,82 26,69.4 26,54 38.6,26 54,26zM44,54c0-4.4 3.6-8 8-8s8,3.6 8,8-3.6,8-8,8-8-3.6-8-8z"/>
+</vector>
+=== FILE: E:\placeholder\app\src\main\res\mipmap-anydpi-v26\ic_launcher.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
+=== FILE: E:\placeholder\app\src\main\res\mipmap-anydpi-v26\ic_launcher_round.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
+=== FILE: E:\placeholder\app\src\main\res\values\colors.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default ink colors (ARGB) -->
+    <color name="ink_blue">#FF0000FF</color>
+    <color name="ink_black">#FF000000</color>
+    <color name="ink_red">#FFFF0000</color>
+    <color name="ink_green">#FF008000</color>
+    
+    <!-- Red margin line -->
+    <color name="red_margin">#FFFF0000</color>
+    
+    <!-- Page number text -->
+    <color name="page_number_text">#FF666666</color>
+    
+    <!-- Baseline guide lines -->
+    <color name="baseline_guide">#FFCCCCCC</color>
+    <color name="midline_guide">#FFE0E0E0</color>
+    <color name="descender_guide">#FFE0E0E0</color>
+    
+    <!-- Selection highlight -->
+    <color name="selection_highlight">#80BBDEFB</color>
+    
+    <!-- Verification grid -->
+    <color name="verification_correct">#FF4CAF50</color>
+    <color name="verification_warning">#FFFF9800</color>
+    <color name="verification_error">#FFF44336</color>
+</resources>
+=== FILE: E:\placeholder\app\src\main\res\values\ic_launcher_background.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#FF2B5A8E</color>
+</resources>
+=== FILE: E:\placeholder\app\src\main\res\values\strings.xml ===
+<resources>
+    <string name="app_name">InkTwin</string>
+    <string name="capture_tab">Capture</string>
+    <string name="editor_tab">Write</string>
+    <string name="preview_tab">Preview</string>
+    <string name="draw_mode">Draw Letters</string>
+    <string name="scan_mode">Scan Pages</string>
+    <string name="continue_button">Continue</string>
+    <string name="export_button">Export</string>
+    <string name="save_button">Save</string>
+    <string name="cancel_button">Cancel</string>
+    <string name="done_button">Done</string>
+    <string name="undo_button">Undo</string>
+    <string name="clear_button">Clear</string>
+    <string name="redraw_button">Redraw</string>
+    <string name="verify_button">Verify &amp; Save</string>
+    <string name="export_format_png">PNG</string>
+    <string name="export_format_pdf">PDF</string>
+    <string name="export_scope_page">This Page Only</string>
+    <string name="export_scope_all">Entire Document</string>
+    <string name="toggle_red_margins">Red Margins</string>
+    <string name="toggle_page_numbers">Page Numbers</string>
+    <string name="ink_color_blue">Blue</string>
+    <string name="ink_color_black">Black</string>
+    <string name="ink_color_red">Red</string>
+    <string name="ink_color_green">Green</string>
+    <string name="ink_color_custom">Custom</string>
+</resources>
+=== FILE: E:\placeholder\app\src\main\res\values\themes.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.InkTwin" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">?android:attr/colorBackground</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
+=== FILE: E:\placeholder\app\src\main\res\xml\backup_rules.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content />
+=== FILE: E:\placeholder\app\src\main\res\xml\data_extraction_rules.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules />
+=== FILE: E:\placeholder\app\src\main\xml\backup_rules.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <include domain="database" path="inktwin_database" />
+    <include domain="file" path="." />
+</full-backup-content>
+=== FILE: E:\placeholder\app\src\main\xml\data_extraction_rules.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="inktwin_database" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="inktwin_database" />
+        <include domain="file" path="." />
+    </device-transfer>
+</data-extraction-rules>
+=== FILE: E:\placeholder\app\src\main\AndroidManifest.xml ===
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.app.inktwin">
+
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <application
+        android:name=".InkTwinApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.InkTwin"
+        tools:targetApi="31">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.InkTwin"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

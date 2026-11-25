@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default ink colors (ARGB) -->
+    <color name="ink_blue">#FF0000FF</color>
+    <color name="ink_black">#FF000000</color>
+    <color name="ink_red">#FFFF0000</color>
+    <color name="ink_green">#FF008000</color>
+    
+    <!-- Red margin line -->
+    <color name="red_margin">#FFFF0000</color>
+    
+    <!-- Page number text -->
+    <color name="page_number_text">#FF666666</color>
+    
+    <!-- Baseline guide lines -->
+    <color name="baseline_guide">#FFCCCCCC</color>
+    <color name="midline_guide">#FFE0E0E0</color>
+    <color name="descender_guide">#FFE0E0E0</color>
+    
+    <!-- Selection highlight -->
+    <color name="selection_highlight">#80BBDEFB</color>
+    
+    <!-- Verification grid -->
+    <color name="verification_correct">#FF4CAF50</color>
+    <color name="verification_warning">#FFFF9800</color>
+    <color name="verification_error">#FFF44336</color>
+</resources>

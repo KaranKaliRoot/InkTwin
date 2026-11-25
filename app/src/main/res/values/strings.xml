@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">InkTwin</string>
+    <string name="capture_tab">Capture</string>
+    <string name="editor_tab">Write</string>
+    <string name="preview_tab">Preview</string>
+    <string name="draw_mode">Draw Letters</string>
+    <string name="scan_mode">Scan Pages</string>
+    <string name="continue_button">Continue</string>
+    <string name="export_button">Export</string>
+    <string name="save_button">Save</string>
+    <string name="cancel_button">Cancel</string>
+    <string name="done_button">Done</string>
+    <string name="undo_button">Undo</string>
+    <string name="clear_button">Clear</string>
+    <string name="redraw_button">Redraw</string>
+    <string name="verify_button">Verify &amp; Save</string>
+    <string name="export_format_png">PNG</string>
+    <string name="export_format_pdf">PDF</string>
+    <string name="export_scope_page">This Page Only</string>
+    <string name="export_scope_all">Entire Document</string>
+    <string name="toggle_red_margins">Red Margins</string>
+    <string name="toggle_page_numbers">Page Numbers</string>
+    <string name="ink_color_blue">Blue</string>
+    <string name="ink_color_black">Black</string>
+    <string name="ink_color_red">Red</string>
+    <string name="ink_color_green">Green</string>
+    <string name="ink_color_custom">Custom</string>
+</resources>
